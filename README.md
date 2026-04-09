@@ -206,7 +206,7 @@ nano ~/.xalgorix.env
 XALGORIX_LLM=openai/gpt-4.5
 XALGORIX_API_KEY=your_api_key
 # OR use Anthropic:
-# XALGORIX_LLM=anthropic/claude-sonnet-4.6
+# XALGORIX_LLM=anthropic/claude-sonnet-4.7
 # XALGORIX_API_KEY=sk-ant-...
 
 # Optional - for custom providers (MiniMax, Ollama, etc.)
@@ -255,7 +255,7 @@ xalgorix --target https://example.com
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `XALGORIX_LLM` | Model name (with optional provider prefix) | `openai/gpt-5.4`, `anthropic/claude-opus-4.6`, `deepseek/deepseek-v4`, `minimax/M3`, `custom/my-model` |
+| `XALGORIX_LLM` | Model name (with optional provider prefix) | `openai/gpt-4o`, `anthropic/claude-opus-4.8`, `deepseek/deepseek-chat-v3`, `minimax/M2.7`, `custom/my-model` |
 | `XALGORIX_API_KEY` | API key | `sk-...` |
 
 #### Optional - API Base (for custom providers)
@@ -321,13 +321,13 @@ xalgorix --target https://example.com
 
 Xalgorix supports multiple LLM providers:
 
-- **OpenAI** — `openai/gpt-5.4`, `openai/gpt-5`, `openai/o1`, `openai/o3`
-- **Anthropic** — `anthropic/claude-opus-4.6`, `anthropic/claude-sonnet-4.6`
-- **DeepSeek** — `deepseek/deepseek-v4`, `deepseek/deepseek-v3`, `deepseek/deepseek-coder`
-- **Google** — `google/gemini-3.1-pro`, `google/gemini-2.0-flash`
+- **OpenAI** — `openai/gpt-4o`, `openai/gpt-5`, `openai/o1`, `openai/o3`
+- **Anthropic** — `anthropic/claude-opus-4.8`, `anthropic/claude-sonnet-4.7`
+- **DeepSeek** — `deepseek/deepseek-chat-v3`, `deepseek/deepseek-v3`, `deepseek/deepseek-coder`
+- **Google** — `google/gemini-2.0-flash`, `google/gemini-2.0-flash`
 - **Groq** — hosts Llama 4, Qwen 3, Mixtral (use model name directly)
-- **Ollama** — `ollama/llama4`, `ollama/qwen3` (local)
-- **MiniMax** — `minimax/M3`, `minimax/Text-01`
+- **Ollama** — `ollama/llama-3.3-70b`, `ollama/qwen3` (local)
+- **MiniMax** — `minimax/M2.7`, `minimax/Text-01`
 
 ---
 
@@ -401,7 +401,7 @@ xalgorix/
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `XALGORIX_LLM` | — | Model (e.g., `openai/gpt-4.5`, `anthropic/claude-sonnet-4.6`) |
+| `XALGORIX_LLM` | — | Model (e.g., `openai/gpt-4.5`, `anthropic/claude-sonnet-4.7`) |
 | `XALGORIX_API_KEY` | — | Your API key |
 | `XALGORIX_API_BASE` | Auto-detected | API endpoint (set for custom providers) |
 | `XALGORIX_DISCORD_WEBHOOK` | — | Discord webhook URL |
@@ -416,13 +416,13 @@ xalgorix/
 
 | Provider | Model Example |
 |----------|--------------|
-| 🟢 OpenAI | `openai/gpt-5.4`, `openai/gpt-5`, `openai/o1`, `openai/o3` |
-| 🔴 Anthropic | `anthropic/claude-opus-4.6`, `anthropic/claude-sonnet-4.6` |
-| 🟣 DeepSeek | `deepseek/deepseek-v4`, `deepseek/deepseek-v3` |
-| 🟠 Google | `google/gemini-3.1-pro`, `google/gemini-2.0-flash` |
-| 🟡 Groq | `llama-4`, `qwen3`, `mixtral` (uses model name directly) |
-| ⚫ Ollama | `ollama/llama4`, `ollama/qwen3` (local) |
-| 🔵 MiniMax | `minimax/M3`, `minimax/Text-01` |
+| 🟢 OpenAI | `openai/gpt-4o`, `openai/gpt-5`, `openai/o1`, `openai/o3` |
+| 🔴 Anthropic | `anthropic/claude-opus-4.8`, `anthropic/claude-sonnet-4.7` |
+| 🟣 DeepSeek | `deepseek/deepseek-chat-v3`, `deepseek/deepseek-v3` |
+| 🟠 Google | `google/gemini-2.0-flash`, `google/gemini-2.0-flash` |
+| 🟡 Groq | `llama-3.3-70b`, `qwen3`, `mixtral` (uses model name directly) |
+| ⚫ Ollama | `ollama/llama-3.3-70b`, `ollama/qwen3` (local) |
+| 🔵 MiniMax | `minimax/M2.7`, `minimax/Text-01` |
 
 ---
 

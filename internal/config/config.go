@@ -16,7 +16,7 @@ import (
 // Config holds all Xalgorix configuration.
 type Config struct {
 	// LLM settings
-	LLM             string // XALGORIX_LLM — model name (e.g. "openai/gpt-5.4", "anthropic/claude-sonnet-4.6")
+	LLM             string // XALGORIX_LLM — model name (e.g. "openai/gpt-4o", "anthropic/claude-sonnet-4.7")
 	APIBase         string // XALGORIX_API_BASE — API endpoint
 	APIKey          string // XALGORIX_API_KEY — API key
 	ReasoningEffort string // XALGORIX_REASONING_EFFORT — "low", "medium", "high"
@@ -168,7 +168,7 @@ func (c *Config) WorkspacePath(rel string) string {
 // Validate checks that required configuration is present.
 func (c *Config) Validate() error {
 	if c.LLM == "" {
-		return fmt.Errorf("XALGORIX_LLM is required. Set it to a model like 'openai/gpt-5.4' or 'anthropic/claude-sonnet-4.6'")
+		return fmt.Errorf("XALGORIX_LLM is required. Set it to a model like 'openai/gpt-4o' or 'anthropic/claude-sonnet-4.7'")
 	}
 
 	return nil
@@ -185,7 +185,7 @@ func CheckEnvFile() error {
 
 	// Check if file exists
 	if _, err := os.Stat(envPath); os.IsNotExist(err) {
-		return fmt.Errorf("configuration file not found: %s\n\nPlease create it with:\n  XALGORIX_LLM=minimax/MiniMax-M2.5\n  XALGORIX_API_KEY=your_api_key\n\nOr run: xalgorix --setup", envPath)
+		return fmt.Errorf("configuration file not found: %s\n\nPlease create it with:\n  XALGORIX_LLM=minimax/MiniMax-M2.7\n  XALGORIX_API_KEY=your_api_key\n\nOr run: xalgorix --setup", envPath)
 	}
 
 	// Read file directly to check for required variables (not system env vars)
@@ -221,7 +221,7 @@ func CheckEnvFile() error {
 	}
 
 	if llm == "" || apiKey == "" {
-		return fmt.Errorf("configuration file is invalid or missing required variables\n\nPlease add to %s:\n  XALGORIX_LLM=minimax/MiniMax-M2.5\n  XALGORIX_API_KEY=your_api_key", envPath)
+		return fmt.Errorf("configuration file is invalid or missing required variables\n\nPlease add to %s:\n  XALGORIX_LLM=minimax/MiniMax-M2.7\n  XALGORIX_API_KEY=your_api_key", envPath)
 	}
 
 	return nil
