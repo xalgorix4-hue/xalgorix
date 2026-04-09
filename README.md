@@ -25,6 +25,9 @@
 ### Vulnerability Details
 ![Vulnerability Details](assets/ui-screenshot-3.png)
 
+### Chat Interface
+![Chat Interface](assets/ui-screenshot-4.png)
+
 ---
 
 ## 🚀 Xalgorix — The Most Powerful Open-Source AI Pentesting Agent
