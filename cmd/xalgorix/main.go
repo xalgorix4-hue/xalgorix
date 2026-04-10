@@ -4,6 +4,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -19,7 +20,7 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/web"
 )
 
-const version = "4.0.12"
+const version = "4.0.13"
 
 func main() {
 	// Top-level crash recovery — catches panics that escape all other handlers.
@@ -88,24 +89,41 @@ func main() {
 	if args.update {
 		fmt.Println("Updating xalgorix to latest version...")
 
-		// Fetch latest version tag from GitHub to avoid stale proxy cache
-		latestVer := "latest"
-		if resp, err := http.Get("https://api.github.com/repos/xalgord/xalgorix/releases/latest"); err == nil && resp.StatusCode == 200 {
-			var release struct {
-				TagName string `json:"tag_name"`
-			}
-			if err := json.NewDecoder(resp.Body).Decode(&release); err == nil {
-				if v := strings.TrimPrefix(release.TagName, "v"); v != "" {
-					latestVer = v
-				}
-			}
-			resp.Body.Close()
+		// Fetch latest release info from GitHub
+		latestVer, downloadURL := fetchLatestRelease()
+		if latestVer == "" {
+			fmt.Fprintf(os.Stderr, "❌ Failed to fetch latest version from GitHub\n")
+			os.Exit(1)
 		}
 
-		fmt.Printf("Installing v%s...\n", latestVer)
+		if latestVer == version {
+			fmt.Printf("✅ Already on latest version v%s\n", version)
+			os.Exit(0)
+		}
 
-		// Use go install with specific version tag — bypasses stale proxy cache
-		// GOPROXY=direct ensures we query the origin GitHub directly
+		fmt.Printf("Latest version: v%s\n", latestVer)
+
+		// Determine install path
+		installPath := resolveInstallPath()
+
+		// Primary: download pre-built binary from GitHub release
+		if downloadURL != "" {
+			fmt.Printf("Downloading binary from GitHub release...\n")
+			if err := installBinary(downloadURL, installPath); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️  Binary download failed: %v\n", err)
+				fmt.Println("Falling back to go install...")
+				goto goInstallFallback
+			}
+			fmt.Println("✅ Updated successfully!")
+			verCmd := exec.Command(installPath, "--version")
+			verCmd.Stdout = os.Stdout
+			verCmd.Run()
+			os.Exit(0)
+		}
+
+	goInstallFallback:
+		// Fallback: use go install with explicit version
+		fmt.Printf("Installing v%s via go install...\n", latestVer)
 		cmd := exec.Command("go", "install", "-v", "github.com/xalgord/xalgorix/v4/cmd/xalgorix@v"+latestVer)
 		cmd.Env = append(os.Environ(),
 			"GOPROXY=direct",
@@ -116,19 +134,14 @@ func main() {
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "❌ Update failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "\nManual install:\n")
+			fmt.Fprintf(os.Stderr, "  GOPROXY=direct go install -v github.com/xalgord/xalgorix/v4/cmd/xalgorix@v%s\n", latestVer)
 			os.Exit(1)
 		}
 
 		fmt.Println("✅ Updated successfully!")
-
-		// Show the new version
-		goPath := os.Getenv("GOPATH")
-		if goPath == "" {
-			goPath = filepath.Join(os.Getenv("HOME"), "go")
-		}
-		verCmd := exec.Command(filepath.Join(goPath, "bin", "xalgorix"), "--version")
+		verCmd := exec.Command(installPath, "--version")
 		verCmd.Stdout = os.Stdout
-		verCmd.Stderr = os.Stderr
 		verCmd.Run()
 		os.Exit(0)
 	}
@@ -512,26 +525,7 @@ func handleUninstall() {
 
 // autoUpdate checks GitHub for a newer release and self-updates if found.
 func autoUpdate() {
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get("https://api.github.com/repos/xalgord/xalgorix/releases/latest")
-	if err != nil {
-		return // silently skip if network is unavailable
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return
-	}
-
-	var release struct {
-		TagName string `json:"tag_name"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return
-	}
-
-	latestVer := strings.TrimPrefix(release.TagName, "v")
+	latestVer, downloadURL := fetchLatestRelease()
 	if latestVer == "" || latestVer == version {
 		return
 	}
@@ -541,19 +535,31 @@ func autoUpdate() {
 	}
 
 	fmt.Printf("\n🔄 New version available: v%s → v%s\n", version, latestVer)
-	fmt.Println("   Installing update via go install...")
 
-	cmd := exec.Command("go", "install", "-v", "github.com/xalgord/xalgorix/v4/cmd/xalgorix@v"+latestVer)
-	cmd.Env = append(os.Environ(),
-		"GOPROXY=direct",
-		"GONOSUMCHECK=github.com/xalgord/*",
-		"GONOSUMDB=github.com/xalgord/*",
-	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Printf("   ⚠️  Auto-update failed: %v (run 'xalgorix --update' manually)\n", err)
-		return
+	installPath := resolveInstallPath()
+
+	// Try binary download first (fastest, avoids Go module issues)
+	if downloadURL != "" {
+		fmt.Println("   Downloading update...")
+		if err := installBinary(downloadURL, installPath); err != nil {
+			fmt.Printf("   ⚠️  Download failed: %v (run 'xalgorix --update' manually)\n", err)
+			return
+		}
+	} else {
+		// Fallback to go install
+		fmt.Println("   Installing update via go install...")
+		cmd := exec.Command("go", "install", "-v", "github.com/xalgord/xalgorix/v4/cmd/xalgorix@v"+latestVer)
+		cmd.Env = append(os.Environ(),
+			"GOPROXY=direct",
+			"GONOSUMCHECK=github.com/xalgord/*",
+			"GONOSUMDB=github.com/xalgord/*",
+		)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Printf("   ⚠️  Auto-update failed: %v (run 'xalgorix --update' manually)\n", err)
+			return
+		}
 	}
 
 	fmt.Printf("   ✅ Updated to v%s! Restarting...\n\n", latestVer)
@@ -599,4 +605,115 @@ func execRestart(path string, argv, env []string) error {
 	cmd.Stderr = os.Stderr
 	cmd.Env = env
 	return cmd.Run()
+}
+
+// fetchLatestRelease queries GitHub for the latest release version and binary download URL.
+func fetchLatestRelease() (version string, downloadURL string) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get("https://api.github.com/repos/xalgord/xalgorix/releases/latest")
+	if err != nil {
+		return "", ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", ""
+	}
+
+	var release struct {
+		TagName string `json:"tag_name"`
+		Assets  []struct {
+			Name               string `json:"name"`
+			BrowserDownloadURL string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", ""
+	}
+
+	ver := strings.TrimPrefix(release.TagName, "v")
+	if ver == "" {
+		return "", ""
+	}
+
+	// Find the binary asset (name == "xalgorix" — the plain Linux binary)
+	for _, asset := range release.Assets {
+		if asset.Name == "xalgorix" {
+			return ver, asset.BrowserDownloadURL
+		}
+	}
+
+	// No binary asset found — return version only (will use go install fallback)
+	return ver, ""
+}
+
+// resolveInstallPath determines where the xalgorix binary should be installed.
+func resolveInstallPath() string {
+	// First: check if we're running from a known path
+	if execPath, err := os.Executable(); err == nil {
+		execPath, _ = filepath.EvalSymlinks(execPath)
+		// If running from GOPATH/bin or /usr/local/bin, install there
+		if strings.Contains(execPath, "/go/bin/") || strings.HasPrefix(execPath, "/usr/local/bin/") {
+			return execPath
+		}
+	}
+	// Default: GOPATH/bin
+	goPath := os.Getenv("GOPATH")
+	if goPath == "" {
+		goPath = filepath.Join(os.Getenv("HOME"), "go")
+	}
+	return filepath.Join(goPath, "bin", "xalgorix")
+}
+
+// installBinary downloads a binary from url and installs it to destPath.
+// Handles "text file busy" on Linux by removing the old file before moving the new one.
+func installBinary(url, destPath string) error {
+	// Download to a temporary file next to the destination
+	tmpPath := destPath + ".new"
+	defer os.Remove(tmpPath) // cleanup on failure
+
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Get(url)
+	if err != nil {
+		return fmt.Errorf("download failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("download returned HTTP %d", resp.StatusCode)
+	}
+
+	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+
+	_, err = io.Copy(tmpFile, resp.Body)
+	tmpFile.Close()
+	if err != nil {
+		return fmt.Errorf("download interrupted: %w", err)
+	}
+
+	// Swap strategy for Linux "text file busy":
+	// 1. Remove the old binary (unlinks it from directory; running process keeps its fd)
+	// 2. Rename the new binary into place (atomic on same filesystem)
+	if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
+		// If remove fails (e.g., permission denied), try rename directly
+		// which will fail with ETXTBSY — then try with sudo
+		log.Printf("Warning: could not remove old binary: %v, trying rename...", err)
+	}
+
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		// Last resort: try sudo mv
+		cmd := exec.Command("sudo", "mv", tmpPath, destPath)
+		if sudoErr := cmd.Run(); sudoErr != nil {
+			return fmt.Errorf("failed to install binary (tried mv and sudo mv): %w", err)
+		}
+	}
+
+	// Ensure executable
+	os.Chmod(destPath, 0755)
+
+	return nil
 }

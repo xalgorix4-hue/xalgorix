@@ -186,16 +186,16 @@
 > ```
 
 ```bash
-# Recommended — install via Go (works on all platforms)
-GOPROXY=direct go install -v github.com/xalgord/xalgorix/v4/cmd/xalgorix@latest
-
-# Or build from source
+# Recommended — build from source
 git clone https://github.com/xalgord/xalgorix.git
 cd xalgorix
 make install
+
+# Or install via Go (use explicit version, not @latest)
+GOPROXY=direct go install -v github.com/xalgord/xalgorix/v4/cmd/xalgorix@v4.0.12
 ```
 
-> **💡 Update:** Run `xalgorix --update` or `GOPROXY=direct go install -v github.com/xalgord/xalgorix/v4/cmd/xalgorix@latest` to get the latest version. Xalgorix also auto-updates on every start.
+> **💡 Update:** Run `xalgorix --update` to get the latest version. Xalgorix also auto-updates on every start by downloading binaries from GitHub releases.
 
 ### 2️⃣ Configure
 

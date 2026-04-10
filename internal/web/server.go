@@ -39,7 +39,7 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/tools/terminal"
 )
 
-const version = "4.0.11"
+const version = "4.0.13"
 
 //go:embed static/*
 var staticFiles embed.FS
