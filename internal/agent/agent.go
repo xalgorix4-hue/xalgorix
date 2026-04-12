@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -182,8 +183,8 @@ func (a *Agent) startWatchdog() func() {
 
 	const (
 		processMaxDuration = 30 * time.Minute // kill single process after this
-		scanMaxDuration    = 0               // 0 = infinite (no scan-level timeout)
-		idleKillThreshold  = 0 * time.Minute // 0 = disabled (was 60min)
+		scanMaxDuration    = 0               // 0 = infinite (no scan-level timeout — needed for 300+ domain scans)
+		idleKillThreshold  = 0 * time.Minute // 0 = disabled (stuck-loop detection handles per-target stalls)
 	)
 
 	go func() {
@@ -384,6 +385,15 @@ func (a *Agent) Run(targets []string, instruction string) {
 	scannerUsed := false     // set true when nuclei/sqlmap/dalfox/ffuf used (optional, not required)
 	dirBustingDone := false  // set true when ffuf/gobuster/dirsearch/feroxbuster detected
 	accessControlTested := false // set true when IDOR/auth bypass testing detected
+
+	// Stuck-loop detection: prevent infinite retries on blocked/WAF targets
+	consecutiveBrowserActions := 0   // consecutive browser_action calls
+	consecutiveWebSearches := 0      // consecutive web_search calls
+	stuckDomain := ""                // domain the agent is stuck on
+	stuckIterations := 0             // total iterations stuck on same domain
+	const stuckBrowserThreshold = 10 // browser actions before nudge
+	const stuckSearchThreshold = 8   // web searches before nudge
+	const stuckHardLimit = 15        // total stuck iterations before force-skip
 
 	// Smart finish evaluation: decides if the agent has done enough work
 	canFinish := func(iter int) (bool, string) {
@@ -614,6 +624,87 @@ Call a tool NOW in your next response.`
 		for _, tc := range toolCalls {
 			if a.stopped.Load() {
 				break
+			}
+
+			// ── Stuck-loop detection ──
+			// Track consecutive browser_action / web_search calls that suggest
+			// the LLM is stuck trying to bypass Cloudflare / WAF / JS challenges
+			if tc.Name == "browser_action" {
+				consecutiveBrowserActions++
+				consecutiveWebSearches = 0 // mixed with browser = still stuck
+				// Extract domain from URL arg if present
+				if u := tc.Args["url"]; u != "" {
+					if parsed, parseErr := url.Parse(u); parseErr == nil && parsed.Host != "" {
+						host := parsed.Hostname()
+						if stuckDomain == "" || stuckDomain == host {
+							stuckDomain = host
+							stuckIterations++
+						} else {
+							// Different domain — reset
+							stuckDomain = host
+							stuckIterations = 1
+							consecutiveBrowserActions = 1
+						}
+					}
+				} else {
+					// No URL arg (snapshot, click, etc.) — still on same domain
+					stuckIterations++
+				}
+			} else if tc.Name == "web_search" {
+				consecutiveWebSearches++
+				q := strings.ToLower(tc.Args["query"])
+				// If searching for bypass/cloudflare/captcha/WAF, it's a stuck signal
+				if strings.Contains(q, "bypass") || strings.Contains(q, "cloudflare") ||
+					strings.Contains(q, "captcha") || strings.Contains(q, "waf") ||
+					strings.Contains(q, "javascript challenge") || strings.Contains(q, "security check") ||
+					strings.Contains(q, "403 forbidden") || strings.Contains(q, "access denied") {
+					stuckIterations++
+				}
+			} else {
+				// A non-browser, non-search tool call = real progress, reset counters
+				if tc.Name != "add_note" && tc.Name != "read_notes" {
+					consecutiveBrowserActions = 0
+					consecutiveWebSearches = 0
+					stuckIterations = 0
+					stuckDomain = ""
+				}
+			}
+
+			// Soft nudge: tell agent to give up on this target
+			if (consecutiveBrowserActions >= stuckBrowserThreshold || consecutiveWebSearches >= stuckSearchThreshold) && stuckIterations >= stuckBrowserThreshold {
+				nudge := fmt.Sprintf(`⚠️ STUCK LOOP DETECTED: You have spent %d iterations trying to access %q with browser/search actions without making progress. This target is likely protected by Cloudflare, a WAF, or a JavaScript challenge that cannot be bypassed.
+
+STOP trying to access this target via browser. Instead:
+1. Close the browser: browser_action command=close
+2. Try using curl/httpx directly (they may get different responses)
+3. If curl also fails, SKIP this target and move to the next one
+4. Call finish if there are no more targets
+
+Do NOT continue browser retries or search for bypass methods.`, stuckIterations, stuckDomain)
+				a.emit(Event{Type: "error", Content: nudge, TotalTokens: tokenCount()})
+				a.msgMu.Lock()
+				a.messages = append(a.messages, llm.Message{Role: "user", Content: nudge})
+				a.msgMu.Unlock()
+				// Reset so the nudge doesn't fire every iteration
+				consecutiveBrowserActions = 0
+				consecutiveWebSearches = 0
+			}
+
+			// Hard limit: force-skip after too many stuck iterations
+			if stuckIterations >= stuckHardLimit {
+				forceMsg := fmt.Sprintf(`⛔ FORCE SKIP: You have been stuck on %q for %d iterations. This target is UNREACHABLE. Close the browser NOW and move to the next target or call finish. Any further browser_action calls to this domain will be blocked.`, stuckDomain, stuckIterations)
+				a.emit(Event{Type: "error", Content: forceMsg, TotalTokens: tokenCount()})
+				a.msgMu.Lock()
+				a.messages = append(a.messages, llm.Message{Role: "user", Content: forceMsg})
+				a.msgMu.Unlock()
+				// Reset hard to prevent getting stuck again on the same domain
+				stuckIterations = 0
+				stuckDomain = ""
+				consecutiveBrowserActions = 0
+				consecutiveWebSearches = 0
+				// Force-close browser to break the cycle
+				browser.CleanupBrowser()
+				continue // skip executing this tool call
 			}
 
 			// Track work before execution
