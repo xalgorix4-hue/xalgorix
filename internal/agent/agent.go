@@ -2048,7 +2048,7 @@ func (a *Agent) buildClosingInstruction(instruction string) string {
 	if strings.Contains(lower, "dom") && (strings.Contains(lower, "clobber") || strings.Contains(lower, "xss")) {
 		skillHints = append(skillHints, "read_skill(name=\"dom-xss\")")
 	}
-	if strings.Contains(lower, "idor") || strings.Contains(lower, "access control") || strings.Contains(lower, "bac") || strings.Contains(lower, "bola") {
+	if strings.Contains(lower, "idor") || strings.Contains(lower, "access control") || strings.Contains(lower, "broken access") || strings.Contains(lower, "bola") || strings.Contains(lower, "insecure direct object") {
 		skillHints = append(skillHints, "read_skill(name=\"idor\")")
 	}
 	if strings.Contains(lower, "jwt") || strings.Contains(lower, "json web token") || strings.Contains(lower, "algorithm confusion") || strings.Contains(lower, "kid") || strings.Contains(lower, "jku") {
@@ -2086,6 +2086,24 @@ func (a *Agent) buildClosingInstruction(instruction string) string {
 	}
 	if strings.Contains(lower, "2fa") || strings.Contains(lower, "mfa") || strings.Contains(lower, "two-factor") || strings.Contains(lower, "multi-factor") {
 		skillHints = append(skillHints, "read_skill(name=\"2fa-mfa-bypass\")")
+	}
+	if strings.Contains(lower, "password reset") || strings.Contains(lower, "forgot password") || strings.Contains(lower, "reset password") || strings.Contains(lower, "reset token") {
+		skillHints = append(skillHints, "read_skill(name=\"host-header-attacks\")")
+	}
+	if strings.Contains(lower, "http/2") || strings.Contains(lower, "http2") || strings.Contains(lower, "single-packet") || strings.Contains(lower, "h2.") {
+		skillHints = append(skillHints, "read_skill(name=\"race-conditions\")", "read_skill(name=\"http-request-smuggling\")")
+	}
+	if strings.Contains(lower, "auth bypass") || strings.Contains(lower, "authentication bypass") || strings.Contains(lower, "broken auth") || strings.Contains(lower, "login bypass") {
+		skillHints = append(skillHints, "read_skill(name=\"authentication-jwt\")", "read_skill(name=\"oauth2-attacks\")", "read_skill(name=\"2fa-mfa-bypass\")")
+	}
+	if strings.Contains(lower, "api testing") || strings.Contains(lower, "api test") || strings.Contains(lower, "api security") || strings.Contains(lower, "rest api") {
+		skillHints = append(skillHints, "read_skill(name=\"idor\")", "read_skill(name=\"broken-function-level-authorization\")", "read_skill(name=\"nosql-injection\")")
+	}
+	if strings.Contains(lower, "privilege escalation") || strings.Contains(lower, "privesc") || strings.Contains(lower, "vertical escalation") || strings.Contains(lower, "horizontal escalation") {
+		skillHints = append(skillHints, "read_skill(name=\"idor\")", "read_skill(name=\"broken-function-level-authorization\")")
+	}
+	if strings.Contains(lower, "clobbering") && !strings.Contains(lower, "dom") {
+		skillHints = append(skillHints, "read_skill(name=\"dom-xss\")")
 	}
 
 	if len(skillHints) > 0 {
