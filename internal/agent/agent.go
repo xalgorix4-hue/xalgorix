@@ -132,11 +132,7 @@ func NewAgent(cfg *config.Config, name string, events chan Event) *Agent {
 				if a.events != nil {
 					parentEvt := evt
 					parentEvt.AgentID = subAgent.ID
-					select {
-					case a.events <- parentEvt:
-					default:
-						// Channel full, skip
-					}
+					safeSend(a.events, parentEvt, 0)
 				}
 			}
 		}()
@@ -925,18 +921,40 @@ func (a *Agent) emit(evt Event) {
 	if a.events != nil {
 		// Critical events (finished, error) must never be dropped — use blocking send with timeout
 		if evt.Type == "finished" || evt.Type == "error" {
-			select {
-			case a.events <- evt:
-			case <-time.After(10 * time.Second):
-				log.Printf("⚠️ CRITICAL: Timed out sending %s event (channel full for 10s)", evt.Type)
+			if !safeSend(a.events, evt, 10*time.Second) {
+				log.Printf("⚠️ CRITICAL: Failed sending %s event (channel closed or full for 10s)", evt.Type)
 			}
 		} else {
-			select {
-			case a.events <- evt:
-			default:
-				log.Printf("⚠️ Event channel full, dropped event type=%s tool=%s", evt.Type, evt.ToolName)
+			if !safeSend(a.events, evt, 0) {
+				// Channel closed or full — silently drop non-critical events
 			}
 		}
+	}
+}
+
+// safeSend sends an event to a channel without panicking if the channel is closed.
+// If timeout > 0, it blocks up to that duration. If timeout == 0, it's non-blocking.
+// Returns true if sent successfully, false if dropped (closed, full, or timed out).
+func safeSend(ch chan Event, evt Event, timeout time.Duration) (sent bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			// "send on closed channel" — channel was closed by parent session
+			sent = false
+		}
+	}()
+	if timeout > 0 {
+		select {
+		case ch <- evt:
+			return true
+		case <-time.After(timeout):
+			return false
+		}
+	}
+	select {
+	case ch <- evt:
+		return true
+	default:
+		return false
 	}
 }
 
