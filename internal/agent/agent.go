@@ -1777,7 +1777,7 @@ droopescan scan drupal -u https://TARGET 2>/dev/null
 - Test for HTML injection in user inputs
 - Test for content spoofing via URL parameters
 
-### PHASE 20: EXPLOIT VERIFICATION (MANDATORY before Phase 21)
+### PHASE 20: EXPLOIT VERIFICATION (MANDATORY before Phase 22)
 ⚠️ DO NOT SKIP THIS PHASE. The report_vulnerability tool WILL REJECT reports without proof.
 
 For EVERY potential vulnerability found in previous phases:
@@ -1809,7 +1809,51 @@ For EVERY potential vulnerability found in previous phases:
 - Use READ-ONLY exploitation only
 - Time-based tests are always safe
 
-### PHASE 21: Final Report
+### PHASE 21: Zero-Day & Novel Vulnerability Discovery
+Go beyond known CVEs. Use behavioral fuzzing and anomaly detection to find vulnerabilities with no public advisory.
+
+**MANDATORY: Load the zero-day research skills first:**
+1. read_skill(name="zero-day-hunting")
+2. read_skill(name="response-anomaly-detection")
+
+**Step 1: Select High-Value Targets**
+- Review your notes from ALL previous phases
+- Identify the top 5-10 parameters/endpoints that showed ANY anomaly: partial reflection, unusual errors, non-standard status codes, timing variations, unexpected response sizes
+- Prioritize: complex parsers (file upload, JSON/XML/YAML), state-changing ops (payment, registration), multi-component boundaries (CDN→WAF→app)
+
+**Step 2: Behavioral Differential Fuzzing**
+- For each selected parameter, establish a response baseline (size, timing, hash, status)
+- Run systematic mutations: type confusion (arrays, objects, booleans, null, integers), encoding differentials (double URL-encode, overlong UTF-8, null bytes, zero-width chars), boundary values (empty, MAX_INT, overflow, format strings, regex bombs)
+- Flag ANY response where status/size/timing/content deviates from baseline
+
+**Step 3: Parser Differential Testing**
+- Test path confusion against WAF/CDN (semicolons, double slashes, URL-encoded paths, case changes, null bytes)
+- Test HTTP method confusion (does PUT/PATCH/DELETE bypass WAF rules that only check GET/POST?)
+- Test Content-Type confusion (send JSON body with XML Content-Type and vice versa)
+- Test header-based routing overrides (X-Original-URL, X-Rewrite-URL, X-Forwarded-Prefix)
+
+**Step 4: Type Confusion & State Machine Attacks**
+- Test JSON type juggling on EVERY API endpoint (boolean true as password, null as required field, NoSQL operators)
+- Test PHP type juggling (magic hashes 0e215962017, array vs string comparison)
+- Test multi-step workflow violations (skip steps, replay steps, reverse order, modify state tokens between steps)
+- Test token/nonce reuse (use OTP/CSRF/reset token twice)
+
+**Step 5: Timing Side-Channel Analysis**
+- For authentication endpoints: does response time differ for valid vs invalid usernames?
+- For comparison endpoints: does processing time correlate with input correctness (character-by-character oracle)?
+- Measure 5+ times per mutation, calculate mean and standard deviation, flag >3 sigma deviations
+
+**Step 6: Anomaly Investigation**
+- For EVERY anomaly detected: investigate WHY it happens, don't just log it
+- Reproduce at least 3 times to rule out flakiness
+- Determine if the anomaly is exploitable — can you extract data, bypass auth, execute code?
+- Attempt to chain anomalies: error leak + SSRF, type confusion + auth bypass, parser differential + injection
+
+**Safe exploitation rules apply:** NEVER delete data, drop tables, or modify production state.
+
+---
+
+### PHASE 22: Final Report
 - Review ALL notes (read_notes with key=all)
 - For EVERY verified finding, call report_vulnerability with:
   - exploitation_proof: PASTE THE ACTUAL EXPLOITATION OUTPUT
@@ -1946,6 +1990,9 @@ func (a *Agent) buildClosingInstruction(instruction string) string {
 	}
 	if strings.Contains(lower, "clobbering") && !strings.Contains(lower, "dom") {
 		skillHints = append(skillHints, "read_skill(name=\"dom-xss\")")
+	}
+	if strings.Contains(lower, "zero-day") || strings.Contains(lower, "zero day") || strings.Contains(lower, "0day") || strings.Contains(lower, "0-day") || strings.Contains(lower, "novel vuln") || strings.Contains(lower, "unknown vuln") || strings.Contains(lower, "behavioral fuzz") || strings.Contains(lower, "mutation fuzz") || strings.Contains(lower, "smart fuzz") || strings.Contains(lower, "anomaly hunt") || strings.Contains(lower, "behavioral analysis") || strings.Contains(lower, "parser differential") {
+		skillHints = append(skillHints, "read_skill(name=\"zero-day-hunting\")", "read_skill(name=\"response-anomaly-detection\")")
 	}
 
 	if len(skillHints) > 0 {
