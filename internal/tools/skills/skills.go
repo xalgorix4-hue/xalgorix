@@ -64,6 +64,135 @@ func listCategories(fsys fs.FS) []string {
 	return cats
 }
 
+// skillAliases maps common shorthand names to their canonical full skill
+// directory names. This lets the LLM agent use natural terms like "xss",
+// "sqli", or "ssrf" without knowing the verbose directory name.
+var skillAliases = map[string]string{
+	// ── Web application vulnerabilities ──────────────────────────────
+	"sql-injection":        "exploiting-sql-injection-vulnerabilities",
+	"sqli":                 "exploiting-sql-injection-vulnerabilities",
+	"sql-injection-sqlmap": "exploiting-sql-injection-with-sqlmap",
+	"sqlmap":               "exploiting-sql-injection-with-sqlmap",
+	"nosql-injection":      "exploiting-nosql-injection-vulnerabilities",
+	"nosqli":               "exploiting-nosql-injection-vulnerabilities",
+	"xss":                  "testing-for-xss-vulnerabilities",
+	"cross-site-scripting": "testing-for-xss-vulnerabilities",
+	"xss-burp":             "testing-for-xss-vulnerabilities-with-burpsuite",
+	"ssrf":                 "performing-ssrf-vulnerability-exploitation",
+	"blind-ssrf":           "performing-blind-ssrf-exploitation",
+	"csrf":                 "performing-csrf-attack-simulation",
+	"cross-site-request-forgery": "performing-csrf-attack-simulation",
+	"xxe":                        "testing-for-xxe-injection-vulnerabilities",
+	"xml-external-entity":        "testing-for-xxe-injection-vulnerabilities",
+	"idor":                       "exploiting-idor-vulnerabilities",
+	"insecure-direct-object-reference": "exploiting-idor-vulnerabilities",
+	"ssti":                    "exploiting-template-injection-vulnerabilities",
+	"template-injection":      "exploiting-template-injection-vulnerabilities",
+	"server-side-template-injection": "exploiting-template-injection-vulnerabilities",
+	"cors":                       "testing-cors-misconfiguration",
+	"cors-misconfiguration":      "testing-cors-misconfiguration",
+	"open-redirect":              "testing-for-open-redirect-vulnerabilities",
+	"clickjacking":               "performing-clickjacking-attack-test",
+	"deserialization":            "exploiting-insecure-deserialization",
+	"insecure-deserialization":   "exploiting-insecure-deserialization",
+	"race-condition":             "exploiting-race-condition-vulnerabilities",
+	"mass-assignment":            "exploiting-mass-assignment-in-rest-apis",
+	"api-injection":              "exploiting-api-injection-vulnerabilities",
+	"command-injection":          "detecting-modbus-command-injection-attacks",
+
+	// ── Authentication & authorization ───────────────────────────────
+	"jwt":               "exploiting-jwt-algorithm-confusion-attack",
+	"jwt-attack":        "exploiting-jwt-algorithm-confusion-attack",
+	"jwt-signing":       "implementing-jwt-signing-and-verification",
+	"oauth":             "exploiting-oauth-misconfiguration",
+	"oauth-misconfig":   "exploiting-oauth-misconfiguration",
+	"oauth-token-theft": "detecting-oauth-token-theft",
+	"forced-browsing":   "bypassing-authentication-with-forced-browsing",
+	"brute-force":       "detecting-rdp-brute-force-attacks",
+	"passwordless":      "implementing-passwordless-authentication-with-fido2",
+	"fido2":             "implementing-passwordless-authentication-with-fido2",
+
+	// ── Reconnaissance ───────────────────────────────────────────────
+	"recon":                "conducting-external-reconnaissance-with-osint",
+	"reconnaissance":       "conducting-external-reconnaissance-with-osint",
+	"osint":                "performing-open-source-intelligence-gathering",
+	"subdomain":            "performing-subdomain-enumeration-with-subfinder",
+	"subdomain-enum":       "performing-subdomain-enumeration-with-subfinder",
+	"subfinder":            "performing-subdomain-enumeration-with-subfinder",
+	"nmap":                 "scanning-network-with-nmap-advanced",
+	"network-scan":         "scanning-network-with-nmap-advanced",
+	"api-enumeration":      "detecting-api-enumeration-attacks",
+	"shadow-api":           "detecting-shadow-api-endpoints",
+	"cert-transparency":    "analyzing-certificate-transparency-for-phishing",
+
+	// ── API security ─────────────────────────────────────────────────
+	"api-security":        "conducting-api-security-testing",
+	"api-gateway":         "implementing-api-gateway-security-controls",
+	"api-rate-limiting":   "implementing-api-rate-limiting-and-throttling",
+	"api-schema":          "implementing-api-schema-validation-security",
+	"api-keys":            "implementing-api-key-security-controls",
+	"api-abuse":           "implementing-api-abuse-detection-with-rate-limiting",
+	"api-posture":         "implementing-api-security-posture-management",
+	"data-exposure":       "exploiting-excessive-data-exposure-in-api",
+
+	// ── Active Directory ─────────────────────────────────────────────
+	"ad-pentest":          "performing-active-directory-penetration-test",
+	"active-directory":    "performing-active-directory-penetration-test",
+	"bloodhound":          "exploiting-active-directory-with-bloodhound",
+	"ad-acl":              "analyzing-active-directory-acl-abuse",
+	"kerberoasting":       "performing-active-directory-penetration-test",
+	"dcsync":              "detecting-dcsync-attack-in-active-directory",
+	"ad-cert":             "exploiting-active-directory-certificate-services-esc1",
+
+	// ── Lateral movement & privilege escalation ──────────────────────
+	"lateral-movement":    "detecting-lateral-movement-in-network",
+	"privilege-escalation": "detecting-privilege-escalation-attempts",
+	"privesc":             "detecting-privilege-escalation-attempts",
+	"aws-privesc":         "detecting-aws-iam-privilege-escalation",
+	"azure-lateral":       "detecting-azure-lateral-movement",
+	"dcom":                "hunting-for-dcom-lateral-movement",
+	"wmi":                 "hunting-for-lateral-movement-via-wmi",
+
+	// ── Phishing ─────────────────────────────────────────────────────
+	"phishing":            "conducting-phishing-incident-response",
+	"spearphishing":       "conducting-spearphishing-simulation-campaign",
+	"phishing-simulation": "executing-phishing-simulation-campaign",
+	"qr-phishing":         "detecting-qr-code-phishing-with-email-security",
+	"email-headers":       "analyzing-email-headers-for-phishing-investigation",
+
+	// ── Cloud & Kubernetes ───────────────────────────────────────────
+	"k8s-privesc":         "detecting-privilege-escalation-in-kubernetes-pods",
+	"opa-gatekeeper":      "implementing-opa-gatekeeper-for-policy-enforcement",
+	"azure-ad":            "auditing-azure-active-directory-configuration",
+	"azure-pim":           "implementing-azure-ad-privileged-identity-management",
+
+	// ── Memory / binary exploitation ─────────────────────────────────
+	"heap-spray":          "analyzing-heap-spray-exploitation",
+
+	// ── Detection & monitoring ───────────────────────────────────────
+	"sql-injection-waf":   "detecting-sql-injection-via-waf-logs",
+	"lateral-splunk":      "detecting-lateral-movement-with-splunk",
+	"lateral-zeek":        "detecting-lateral-movement-with-zeek",
+
+	// ── Mobile ───────────────────────────────────────────────────────
+	"burpsuite-mobile":    "intercepting-mobile-traffic-with-burpsuite",
+	"burp":                "intercepting-mobile-traffic-with-burpsuite",
+
+	// ── Misc ─────────────────────────────────────────────────────────
+	"darkweb":             "monitoring-darkweb-sources",
+	"dmarc":               "performing-dmarc-policy-enforcement-rollout",
+}
+
+// resolveAlias returns the canonical skill name for a shorthand alias.
+// If no alias matches, the original name is returned unchanged.
+func resolveAlias(name string) string {
+	key := strings.ToLower(name)
+	if canonical, ok := skillAliases[key]; ok {
+		return canonical
+	}
+	return name
+}
+
 func makeReadSkill(fsys fs.FS) func(args map[string]string) (tools.Result, error) {
 	return func(args map[string]string) (tools.Result, error) {
 		name := strings.TrimSpace(args["name"])
@@ -85,6 +214,9 @@ func makeReadSkill(fsys fs.FS) func(args map[string]string) (tools.Result, error
 		if name == "" {
 			return tools.Result{Error: "skill name is empty after sanitization"}, nil
 		}
+
+		// Resolve common shorthand aliases (e.g. "xss" → full skill name).
+		name = resolveAlias(name)
 
 		// If a category was specified, look there first.
 		if category != "" {

@@ -183,3 +183,67 @@ func TestListSkills_EmptyCategory(t *testing.T) {
 		t.Errorf("expected 0 skills for nonexistent category, got: %s", result.Output)
 	}
 }
+
+func TestResolveAlias(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"xss", "testing-for-xss-vulnerabilities"},
+		{"XSS", "testing-for-xss-vulnerabilities"},
+		{"sqli", "exploiting-sql-injection-vulnerabilities"},
+		{"sql-injection", "exploiting-sql-injection-vulnerabilities"},
+		{"ssrf", "performing-ssrf-vulnerability-exploitation"},
+		{"csrf", "performing-csrf-attack-simulation"},
+		{"xxe", "testing-for-xxe-injection-vulnerabilities"},
+		{"idor", "exploiting-idor-vulnerabilities"},
+		{"ssti", "exploiting-template-injection-vulnerabilities"},
+		{"cors", "testing-cors-misconfiguration"},
+		{"jwt", "exploiting-jwt-algorithm-confusion-attack"},
+		{"oauth", "exploiting-oauth-misconfiguration"},
+		{"nmap", "scanning-network-with-nmap-advanced"},
+		{"recon", "conducting-external-reconnaissance-with-osint"},
+		{"privesc", "detecting-privilege-escalation-attempts"},
+		{"bloodhound", "exploiting-active-directory-with-bloodhound"},
+		// Non-alias passthrough
+		{"some-random-name", "some-random-name"},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		got := resolveAlias(tc.input)
+		if got != tc.want {
+			t.Errorf("resolveAlias(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestReadSkill_Alias(t *testing.T) {
+	// Set up a test FS that has the full canonical name the alias resolves to.
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "vulnerabilities", "exploiting-sql-injection-vulnerabilities"), 0755)
+	os.WriteFile(
+		filepath.Join(dir, "vulnerabilities", "exploiting-sql-injection-vulnerabilities", "SKILL.md"),
+		[]byte("# SQL Injection\nFull methodology..."),
+		0644,
+	)
+
+	fn := makeReadSkill(os.DirFS(dir))
+
+	// Use shorthand alias
+	result, err := fn(map[string]string{"name": "sql-injection"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result.Output, "SQL Injection") {
+		t.Errorf("alias 'sql-injection' should resolve to full skill, got: %s", result.Output)
+	}
+
+	// Also test 'sqli' alias
+	result, err = fn(map[string]string{"name": "sqli"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result.Output, "SQL Injection") {
+		t.Errorf("alias 'sqli' should resolve to full skill, got: %s", result.Output)
+	}
+}
