@@ -29,7 +29,7 @@ import (
 // The hardcoded fallback is only used when developers `go run` the package
 // without ldflags. It is a `var` (not `const`) precisely so ldflags can
 // rewrite it.
-var version = "4.2.7"
+var version = "4.2.8"
 
 func main() {
 	// Top-level crash recovery — catches panics that escape all other handlers.
@@ -163,11 +163,17 @@ func main() {
 		goBinPath := filepath.Join(goPath, "bin", "xalgorix")
 		if goBinPath != installPath {
 			if _, err := os.Stat(goBinPath); err == nil {
-				// Try direct copy first, fall back to sudo cp
-				cpCmd := exec.Command("cp", goBinPath, installPath)
-				if cpErr := cpCmd.Run(); cpErr != nil {
-					cpCmd = exec.Command("sudo", "cp", goBinPath, installPath)
-					cpCmd.Run()
+				// On Linux, you can't overwrite a running binary ("text file busy").
+				// Remove the old binary first, then move the new one in place.
+				os.Remove(installPath) // ignore error if not exists
+				mvCmd := exec.Command("mv", goBinPath, installPath)
+				if mvErr := mvCmd.Run(); mvErr != nil {
+					// Fall back to sudo
+					cpCmd := exec.Command("sudo", "sh", "-c", fmt.Sprintf("rm -f %s && mv %s %s", installPath, goBinPath, installPath))
+					if sudoErr := cpCmd.Run(); sudoErr != nil {
+						fmt.Fprintf(os.Stderr, "⚠️  Could not copy binary to %s: %v\n", installPath, sudoErr)
+						fmt.Fprintf(os.Stderr, "   New binary is at: %s\n", goBinPath)
+					}
 				}
 				os.Chmod(installPath, 0755)
 			}
@@ -611,10 +617,14 @@ func autoUpdate() {
 		goBinPath := filepath.Join(goPath, "bin", "xalgorix")
 		if goBinPath != installPath {
 			if _, statErr := os.Stat(goBinPath); statErr == nil {
-				cpCmd := exec.Command("cp", goBinPath, installPath)
-				if cpErr := cpCmd.Run(); cpErr != nil {
-					cpCmd = exec.Command("sudo", "cp", goBinPath, installPath)
-					cpCmd.Run()
+				os.Remove(installPath)
+				mvCmd := exec.Command("mv", goBinPath, installPath)
+				if mvErr := mvCmd.Run(); mvErr != nil {
+					cpCmd := exec.Command("sudo", "sh", "-c", fmt.Sprintf("rm -f %s && mv %s %s", installPath, goBinPath, installPath))
+					if sudoErr := cpCmd.Run(); sudoErr != nil {
+						fmt.Fprintf(os.Stderr, "   ⚠️  Could not copy binary to %s: %v\n", installPath, sudoErr)
+						fmt.Fprintf(os.Stderr, "      New binary is at: %s\n", goBinPath)
+					}
 				}
 				os.Chmod(installPath, 0755)
 			}
