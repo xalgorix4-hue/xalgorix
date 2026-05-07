@@ -393,12 +393,8 @@ func printUsage() {
 
 // handleStart installs and starts xalgorix as a systemd service
 func handleStart() {
-	// Determine install path
-	goPath := os.Getenv("GOPATH")
-	if goPath == "" {
-		goPath = filepath.Join(os.Getenv("HOME"), "go")
-	}
-	installPath := filepath.Join(goPath, "bin", "xalgorix")
+	// Determine install path — use the same resolver as --update
+	installPath := resolveInstallPath()
 
 	// Check if binary exists
 	if _, err := os.Stat(installPath); os.IsNotExist(err) {
@@ -489,12 +485,8 @@ func startBackground() {
 		os.Exit(1)
 	}
 
-	// Use GOPATH
-	goPath := os.Getenv("GOPATH")
-	if goPath == "" {
-		goPath = filepath.Join(os.Getenv("HOME"), "go")
-	}
-	installPath := filepath.Join(goPath, "bin", "xalgorix")
+	// Use the same resolver as --update / --start
+	installPath := resolveInstallPath()
 
 	// Start via bash to source env file
 	homeDir := os.Getenv("HOME")
@@ -568,12 +560,8 @@ func handleUninstall() {
 	cmd := exec.Command("pkill", "-f", "xalgorix")
 	cmd.Run()
 
-	// Determine install path
-	goPath := os.Getenv("GOPATH")
-	if goPath == "" {
-		goPath = filepath.Join(os.Getenv("HOME"), "go")
-	}
-	installPath := filepath.Join(goPath, "bin", "xalgorix")
+	// Determine install path — use the same resolver as --update
+	installPath := resolveInstallPath()
 
 	// Remove binary
 	if _, err := os.Stat(installPath); err == nil {
