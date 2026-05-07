@@ -67,11 +67,15 @@ For EVERY potential vulnerability found in Phase 2, you MUST:
 - NEVER execute destructive commands (rm, dd, mkfs, etc.)
 - Proof = command output in response
 
-**IDOR (Insecure Direct Object Reference) — REQUIRES AUTHENTICATION:**
-- MUST be logged in as User A to test IDOR (unauthenticated = just "no access", not a vuln)
-- While logged in as User A: try accessing User B's resources by changing IDs/parameters
-  Example: User A's profile is /profile?id=100 — try /profile?id=101 (another user's profile)
-- Proof = AS User A, you receive User B's data (not your own)
+**IDOR (Insecure Direct Object Reference) — REQUIRES TWO ACCOUNTS:**
+- Create TWO accounts using agentmail (e.g., userA@agentmail.to and userB@agentmail.to)
+- Login as User A → browser_action command=save_session session_name=user_a
+- Login as User B → browser_action command=save_session session_name=user_b
+- Load user_a: find resource IDs (profile IDs, order IDs, API object IDs)
+- Load user_b: attempt to access user_a's resources by changing IDs in URLs/API calls
+  Example: User A's profile is /profile?id=100 → load user_b session → try /profile?id=100
+- Use browser_action command=list_sessions to verify saved sessions
+- Proof = AS User B, you receive User A's data (not your own)
 - Auth Bypass (different): accessing protected endpoints without any credentials
 
 **File Inclusion (LFI/RFI):**

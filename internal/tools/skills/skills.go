@@ -178,6 +178,46 @@ var skillAliases = map[string]string{
 	"burpsuite-mobile":    "intercepting-mobile-traffic-with-burpsuite",
 	"burp":                "intercepting-mobile-traffic-with-burpsuite",
 
+	// ── File upload testing ──────────────────────────────────────────
+	"file-upload":         "exploiting-file-upload-vulnerabilities",
+	"upload":              "exploiting-file-upload-vulnerabilities",
+	"upload-bypass":       "exploiting-file-upload-vulnerabilities",
+	"webshell-upload":     "exploiting-file-upload-vulnerabilities",
+
+	// ── CMS-specific testing ────────────────────────────────────────
+	"cms":                 "performing-cms-specific-security-testing",
+	"cms-testing":         "performing-cms-specific-security-testing",
+	"wordpress":           "performing-cms-specific-security-testing",
+	"wpscan":              "performing-cms-specific-security-testing",
+	"drupal":              "performing-cms-specific-security-testing",
+	"joomla":              "performing-cms-specific-security-testing",
+
+	// ── Subdomain takeover ──────────────────────────────────────────
+	"subdomain-takeover":  "exploiting-subdomain-takeover-vulnerabilities",
+	"takeover":            "exploiting-subdomain-takeover-vulnerabilities",
+	"dangling-cname":      "exploiting-subdomain-takeover-vulnerabilities",
+
+	// ── Zero-day & novel vulnerability discovery ────────────────────
+	"zero-day":            "performing-zero-day-vulnerability-discovery",
+	"0day":                "performing-zero-day-vulnerability-discovery",
+	"novel-vuln":          "performing-zero-day-vulnerability-discovery",
+	"attack-chaining":     "performing-zero-day-vulnerability-discovery",
+	"logic-flaw":          "performing-zero-day-vulnerability-discovery",
+
+	// ── Exploit verification ────────────────────────────────────────
+	"exploit-verification": "performing-exploit-verification",
+	"verify-exploit":       "performing-exploit-verification",
+	"false-positive":       "performing-exploit-verification",
+	"proof-of-concept":     "performing-exploit-verification",
+	"poc":                  "performing-exploit-verification",
+
+	// ── Email security testing ──────────────────────────────────────
+	"email-security":      "performing-email-security-testing",
+	"email-testing":       "performing-email-security-testing",
+	"smtp-relay":          "performing-email-security-testing",
+	"email-spoofing":      "performing-email-security-testing",
+	"spf-bypass":          "performing-email-security-testing",
+
 	// ── Misc ─────────────────────────────────────────────────────────
 	"darkweb":             "monitoring-darkweb-sources",
 	"dmarc":               "performing-dmarc-policy-enforcement-rollout",

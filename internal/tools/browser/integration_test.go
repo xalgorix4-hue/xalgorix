@@ -325,8 +325,8 @@ func TestSaveSession_InMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("save_session failed: %v", err)
 	}
-	if !strings.Contains(out, "Session saved") {
-		t.Errorf("output = %q, want 'Session saved'", out)
+	if !strings.Contains(out, "Session") || !strings.Contains(out, "saved") {
+		t.Errorf("output = %q, want session saved confirmation", out)
 	}
 }
 
@@ -334,8 +334,8 @@ func TestLoadSession_NoSaved(t *testing.T) {
 	ctxID := "int-session-nosaved"
 	launchCtx(t, ctxID, "https://example.com")
 	out, _ := action(ctxID, map[string]string{"command": "load_session"})
-	if !strings.Contains(out, "No saved session") {
-		t.Errorf("output = %q, want 'No saved session'", out)
+	if !strings.Contains(out, "No session named") {
+		t.Errorf("output = %q, want 'No session named'", out)
 	}
 }
 

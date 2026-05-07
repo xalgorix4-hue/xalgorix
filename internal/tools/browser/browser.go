@@ -33,14 +33,14 @@ var (
 )
 
 type browserStore struct {
-	mu           sync.Mutex
-	browser      *rod.Browser
-	page         *rod.Page
-	pages        map[string]*rod.Page
-	nextTab      int
-	currentTab   string
-	savedCookies []*proto.NetworkCookie
-	sessionPath  string
+	mu            sync.Mutex
+	browser       *rod.Browser
+	page          *rod.Page
+	pages         map[string]*rod.Page
+	nextTab       int
+	currentTab    string
+	savedSessions map[string][]*proto.NetworkCookie // keyed by session name
+	sessionDir    string                            // base directory for session files
 }
 
 // getBrowserStoreByID returns the browser store for a specific context ID.
@@ -59,8 +59,9 @@ func getBrowserStoreByID(id string) *browserStore {
 		return s
 	}
 	s = &browserStore{
-		pages:   make(map[string]*rod.Page),
-		nextTab: 1,
+		pages:         make(map[string]*rod.Page),
+		nextTab:       1,
+		savedSessions: make(map[string][]*proto.NetworkCookie),
 	}
 	browserStores[id] = s
 	return s
@@ -81,21 +82,39 @@ type savedCookieEntry struct {
 	HTTPOnly bool   `json:"httponly"`
 }
 
-// SetSessionPath configures where session.json is saved on disk.
+// SetSessionPath configures where session files are saved on disk.
 func SetSessionPath(dir string) {
 	SetSessionPathForCtx(scanctx.Default().ID, dir)
 }
 
-// SetSessionPathForCtx configures session path for a specific context.
+// SetSessionPathForCtx configures the session directory for a specific context.
 func SetSessionPathForCtx(ctxID, dir string) {
 	s := getBrowserStoreByID(ctxID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if dir != "" {
-		s.sessionPath = filepath.Join(dir, "session.json")
-	} else {
-		s.sessionPath = ""
+	s.sessionDir = dir
+}
+
+// sanitizeSessionName strips path separators and dots to prevent directory traversal.
+func sanitizeSessionName(name string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || r == '.' || r == 0 {
+			return '_'
+		}
+		return r
+	}, name)
+}
+
+// sessionFilePath returns the disk path for a named session file.
+func sessionFilePath(dir, name string) string {
+	if dir == "" {
+		return ""
 	}
+	if name == "" || name == "default" {
+		return filepath.Join(dir, "session.json")
+	}
+	safe := sanitizeSessionName(name)
+	return filepath.Join(dir, safe+"_session.json")
 }
 
 // GetCurrentPage returns the currently active page, or nil if the browser
@@ -150,7 +169,7 @@ func CleanupContext(contextID string) {
 			s.browser = nil
 			s.page = nil
 			s.pages = make(map[string]*rod.Page)
-			s.savedCookies = nil
+			s.savedSessions = make(map[string][]*proto.NetworkCookie)
 		}
 		s.mu.Unlock()
 		delete(browserStores, contextID)
@@ -178,8 +197,9 @@ ACTIONS:
   execute_js   — Run arbitrary JavaScript (e.g., document.cookie)
   get_cookies  — Get all cookies for the current domain
   set_cookie   — Set a cookie (name, value, domain)
-  save_session — Save current cookies for later restoration
-  load_session — Restore previously saved cookies
+  save_session — Save current cookies under a session name (default: "default")
+  load_session — Restore cookies from a named session (default: "default")
+  list_sessions— List all saved session names
   wait         — Wait for a selector to appear or for navigation
   select       — Select an option from a dropdown
   fill_form    — Auto-fill a form: provide field=value pairs
@@ -215,6 +235,7 @@ SIGNUP/LOGIN WORKFLOW:
 			{Name: "domain", Description: "Cookie domain (for set_cookie)", Required: false},
 			{Name: "timeout", Description: "Timeout in seconds for wait actions (default: 10)", Required: false},
 			{Name: "fields", Description: "Form fields as key=value pairs separated by | (for fill_form). Example: email=test@mail.com|password=Pass123|name=John", Required: false},
+			{Name: "session_name", Description: "Session name for save_session/load_session (default: 'default'). Use distinct names for multi-account IDOR testing, e.g. 'admin', 'user_a'.", Required: false},
 		},
 		Execute: func(args map[string]string) (tools.Result, error) {
 			return browserActionForRegistry(r, args)
@@ -450,9 +471,11 @@ func browserActionWithContext(ctxID string, args map[string]string) (tools.Resul
 	case "set_cookie":
 		return setCookie(ctxID, args["name"], args["text"], args["domain"])
 	case "save_session":
-		return saveSession(ctxID)
+		return saveSession(ctxID, args["session_name"])
 	case "load_session":
-		return loadSession(ctxID)
+		return loadSession(ctxID, args["session_name"])
+	case "list_sessions":
+		return listSessions(ctxID)
 	case "wait":
 		return waitFor(ctxID, args["selector"], args["text"], args["timeout"])
 	case "select":
@@ -474,7 +497,7 @@ func browserActionWithContext(ctxID string, args map[string]string) (tools.Resul
 	case "close":
 		return closeBrowser(ctxID)
 	default:
-		return tools.Result{}, fmt.Errorf("unknown browser action: %s. Available: launch, goto, snapshot, click, type, submit, scroll, screenshot, get_html, execute_js, get_cookies, set_cookie, save_session, load_session, wait, select, fill_form, get_url, iframe, main_frame, extract_links, new_tab, switch_tab, close", command)
+		return tools.Result{}, fmt.Errorf("unknown browser action: %s. Available: launch, goto, snapshot, click, type, submit, scroll, screenshot, get_html, execute_js, get_cookies, set_cookie, save_session, load_session, list_sessions, wait, select, fill_form, get_url, iframe, main_frame, extract_links, new_tab, switch_tab, close", command)
 	}
 }
 
@@ -696,11 +719,18 @@ func setCookie(ctxID, name, value, domain string) (tools.Result, error) {
 	}, nil
 }
 
-// saveSession saves all current cookies for later restoration (memory + disk)
-func saveSession(ctxID string) (tools.Result, error) {
+// saveSession saves all current cookies under a named session (memory + disk)
+func saveSession(ctxID, sessionName string) (tools.Result, error) {
 	s := getBrowserStoreByID(ctxID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
+	}
+
+	if sessionName == "" {
+		sessionName = "default"
 	}
 
 	cookies, err := s.page.Cookies([]string{})
@@ -708,10 +738,11 @@ func saveSession(ctxID string) (tools.Result, error) {
 		return tools.Result{}, fmt.Errorf("failed to get cookies: %w", err)
 	}
 
-	s.savedCookies = cookies
+	s.savedSessions[sessionName] = cookies
 
 	// Persist to disk
-	if s.sessionPath != "" {
+	diskPath := sessionFilePath(s.sessionDir, sessionName)
+	if diskPath != "" {
 		entries := make([]savedCookieEntry, 0, len(cookies))
 		for _, c := range cookies {
 			entries = append(entries, savedCookieEntry{
@@ -725,62 +756,86 @@ func saveSession(ctxID string) (tools.Result, error) {
 		}
 		data, err := json.MarshalIndent(entries, "", "  ")
 		if err == nil {
-			if err := os.WriteFile(s.sessionPath, data, 0644); err != nil {
-				log.Printf("[browser] Warning: failed to save session to %s: %v", s.sessionPath, err)
+			if err := os.WriteFile(diskPath, data, 0600); err != nil {
+				log.Printf("[browser] Warning: failed to save session '%s' to %s: %v", sessionName, diskPath, err)
 			} else {
-				log.Printf("[browser] Session saved to disk: %s (%d cookies)", s.sessionPath, len(entries))
+				log.Printf("[browser] Session '%s' saved to disk: %s (%d cookies)", sessionName, diskPath, len(entries))
 			}
 		}
 	}
 
 	return tools.Result{
-		Output: fmt.Sprintf("✅ Session saved: %d cookies stored (memory + disk). Use load_session to restore.", len(cookies)),
-		Metadata: map[string]any{"cookies_saved": len(cookies)},
+		Output: fmt.Sprintf("✅ Session '%s' saved: %d cookies stored (memory + disk). Use load_session session_name=%s to restore.", sessionName, len(cookies), sessionName),
+		Metadata: map[string]any{"cookies_saved": len(cookies), "session_name": sessionName},
 	}, nil
 }
 
-// loadSession restores previously saved cookies (memory first, then disk fallback)
-func loadSession(ctxID string) (tools.Result, error) {
+// loadSession restores cookies from a named session (memory first, then disk fallback)
+func loadSession(ctxID, sessionName string) (tools.Result, error) {
 	s := getBrowserStoreByID(ctxID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.page == nil {
 		return tools.Result{}, fmt.Errorf("browser not launched")
 	}
 
+	if sessionName == "" {
+		sessionName = "default"
+	}
+
+	// Check in-memory first
+	cookies := s.savedSessions[sessionName]
+
 	// Try disk fallback if no in-memory cookies
-	if len(s.savedCookies) == 0 && s.sessionPath != "" {
-		if data, err := os.ReadFile(s.sessionPath); err == nil {
-			var entries []savedCookieEntry
-			if err := json.Unmarshal(data, &entries); err == nil && len(entries) > 0 {
-				log.Printf("[browser] Loading %d cookies from disk: %s", len(entries), s.sessionPath)
-				params := make([]*proto.NetworkCookieParam, 0, len(entries))
-				for _, e := range entries {
-					params = append(params, &proto.NetworkCookieParam{
-						Name:     e.Name,
-						Value:    e.Value,
-						Domain:   e.Domain,
-						Path:     e.Path,
-						Secure:   e.Secure,
-						HTTPOnly: e.HTTPOnly,
-					})
+	if len(cookies) == 0 {
+		diskPath := sessionFilePath(s.sessionDir, sessionName)
+		if diskPath != "" {
+			if data, err := os.ReadFile(diskPath); err == nil {
+				var entries []savedCookieEntry
+				if err := json.Unmarshal(data, &entries); err == nil && len(entries) > 0 {
+					log.Printf("[browser] Loading session '%s' from disk: %s (%d cookies)", sessionName, diskPath, len(entries))
+					params := make([]*proto.NetworkCookieParam, 0, len(entries))
+					for _, e := range entries {
+						params = append(params, &proto.NetworkCookieParam{
+							Name:     e.Name,
+							Value:    e.Value,
+							Domain:   e.Domain,
+							Path:     e.Path,
+							Secure:   e.Secure,
+							HTTPOnly: e.HTTPOnly,
+						})
+					}
+					// Clear existing cookies before restoring to avoid mixed auth state
+					_ = proto.NetworkClearBrowserCookies{}.Call(s.page)
+					if err := s.page.SetCookies(params); err != nil {
+						return tools.Result{}, fmt.Errorf("failed to restore session '%s' from disk: %w", sessionName, err)
+					}
+					if err := s.page.Timeout(10 * time.Second).Reload(); err != nil {
+						log.Printf("[browser] Warning: page reload after session '%s' restore failed: %v", sessionName, err)
+					}
+					if err := s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second); err != nil {
+						log.Printf("[browser] Warning: page wait-stable after session '%s' restore failed: %v", sessionName, err)
+					}
+					return tools.Result{
+						Output:   fmt.Sprintf("✅ Session '%s' restored from disk: %d cookies loaded and page refreshed.", sessionName, len(entries)),
+						Metadata: map[string]any{"session_name": sessionName, "cookies_loaded": len(entries)},
+					}, nil
 				}
-				if err := s.page.SetCookies(params); err != nil {
-					return tools.Result{}, fmt.Errorf("failed to restore cookies from disk: %w", err)
-				}
-				s.page.Timeout(10 * time.Second).Reload()
-				s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
-				return tools.Result{
-					Output: fmt.Sprintf("✅ Session restored from disk: %d cookies loaded and page refreshed.", len(entries)),
-				}, nil
 			}
 		}
 	}
 
-	if len(s.savedCookies) == 0 {
-		return tools.Result{Output: "No saved session found. Use save_session first after logging in."}, nil
+	if len(cookies) == 0 {
+		avail := listSessionNames(s)
+		if len(avail) > 0 {
+			return tools.Result{Output: fmt.Sprintf("No session named '%s' found. Available sessions: %s", sessionName, strings.Join(avail, ", "))}, nil
+		}
+		return tools.Result{Output: fmt.Sprintf("No session named '%s' found. Use save_session session_name=%s first after logging in.", sessionName, sessionName)}, nil
 	}
 
-	params := make([]*proto.NetworkCookieParam, 0, len(s.savedCookies))
-	for _, c := range s.savedCookies {
+	params := make([]*proto.NetworkCookieParam, 0, len(cookies))
+	for _, c := range cookies {
 		params = append(params, &proto.NetworkCookieParam{
 			Name:     c.Name,
 			Value:    c.Value,
@@ -791,17 +846,89 @@ func loadSession(ctxID string) (tools.Result, error) {
 		})
 	}
 
+	// Clear existing cookies before restoring to avoid mixed auth state
+	_ = proto.NetworkClearBrowserCookies{}.Call(s.page)
 	if err := s.page.SetCookies(params); err != nil {
-		return tools.Result{}, fmt.Errorf("failed to restore cookies: %w", err)
+		return tools.Result{}, fmt.Errorf("failed to restore session '%s': %w", sessionName, err)
 	}
 
-	// Reload s.page to apply cookies
-	s.page.Timeout(10 * time.Second).Reload()
-	s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second)
+	// Reload page to apply cookies
+	if err := s.page.Timeout(10 * time.Second).Reload(); err != nil {
+		log.Printf("[browser] Warning: page reload after session '%s' restore failed: %v", sessionName, err)
+	}
+	if err := s.page.Timeout(10 * time.Second).WaitStable(1 * time.Second); err != nil {
+		log.Printf("[browser] Warning: page wait-stable after session '%s' restore failed: %v", sessionName, err)
+	}
 
 	return tools.Result{
-		Output: fmt.Sprintf("✅ Session restored: %d cookies loaded and page refreshed.", len(s.savedCookies)),
+		Output:   fmt.Sprintf("✅ Session '%s' restored: %d cookies loaded and page refreshed.", sessionName, len(cookies)),
+		Metadata: map[string]any{"session_name": sessionName, "cookies_loaded": len(cookies)},
 	}, nil
+}
+
+// listSessions returns all saved session names for a context
+func listSessions(ctxID string) (tools.Result, error) {
+	s := getBrowserStoreByID(ctxID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	names := listSessionNames(s)
+
+	// Also check disk for any sessions not in memory
+	if s.sessionDir != "" {
+		files, err := os.ReadDir(s.sessionDir)
+		if err == nil {
+			for _, f := range files {
+				if f.IsDir() {
+					continue
+				}
+				name := f.Name()
+				if name == "session.json" {
+					// default session on disk
+					found := false
+					for _, n := range names {
+						if n == "default" {
+							found = true
+							break
+						}
+					}
+					if !found {
+						names = append(names, "default (disk)")
+					}
+				} else if strings.HasSuffix(name, "_session.json") {
+					sessName := strings.TrimSuffix(name, "_session.json")
+					found := false
+					for _, n := range names {
+						if n == sessName {
+							found = true
+							break
+						}
+					}
+					if !found {
+						names = append(names, sessName+" (disk)")
+					}
+				}
+			}
+		}
+	}
+
+	if len(names) == 0 {
+		return tools.Result{Output: "No saved sessions. Use save_session session_name=NAME after logging in."}, nil
+	}
+
+	return tools.Result{
+		Output:   fmt.Sprintf("Saved sessions: %s\nUse load_session session_name=NAME to switch.", strings.Join(names, ", ")),
+		Metadata: map[string]any{"sessions": names},
+	}, nil
+}
+
+// listSessionNames returns in-memory session names
+func listSessionNames(s *browserStore) []string {
+	names := make([]string, 0, len(s.savedSessions))
+	for name := range s.savedSessions {
+		names = append(names, name)
+	}
+	return names
 }
 
 // waitFor waits for an element to appear, navigation to complete, or a timeout
@@ -1297,9 +1424,16 @@ func closeBrowser(ctxID string) (tools.Result, error) {
 
 // cleanupBrowserLocked closes browser resources (must hold s.mu).
 func cleanupBrowserLocked(s *browserStore) {
-	s.savedCookies = nil
+	s.savedSessions = make(map[string][]*proto.NetworkCookie)
 	if s.browser != nil {
-		s.browser.MustClose()
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[browser] cleanupBrowserLocked: MustClose recovered: %v", r)
+				}
+			}()
+			s.browser.MustClose()
+		}()
 		s.browser = nil
 		s.page = nil
 		s.pages = make(map[string]*rod.Page)
@@ -1325,7 +1459,7 @@ func CleanupBrowser() {
 		s.browser = nil
 		s.page = nil
 		s.pages = make(map[string]*rod.Page)
-		s.savedCookies = nil
+		s.savedSessions = make(map[string][]*proto.NetworkCookie)
 	}
 }
 

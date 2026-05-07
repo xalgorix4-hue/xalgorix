@@ -1685,16 +1685,34 @@ Step 6 - Complete verification:
   browser_action command=wait text=navigation
   browser_action command=snapshot → confirm account is verified
 
-Step 7 - Login with the new account:
+Step 7 - Login with account A and save as named session:
   browser_action command=goto url=https://TARGET/login
   browser_action command=fill_form fields=email=xalgotest123@agentmail.to|password=SecureP@ss123!
   browser_action command=submit
   browser_action command=wait text=navigation
   browser_action command=get_cookies → capture session
-  browser_action command=save_session
+  browser_action command=save_session session_name=user_a
 
-Step 8 - Test authenticated vulnerabilities:
-  NOW test for IDOR, privilege escalation, auth bypass with the session cookies.
+Step 8 - Create second account and save as separate session:
+  → Create a SECOND account using agentmail (different email, e.g. xalgotest456@agentmail.to)
+  → Complete signup + verification flow for account B
+  browser_action command=goto url=https://TARGET/login
+  browser_action command=fill_form fields=email=xalgotest456@agentmail.to|password=SecureP@ss456!
+  browser_action command=submit
+  browser_action command=wait text=navigation
+  browser_action command=save_session session_name=user_b
+
+Step 9 - IDOR Two-Account Testing Workflow:
+  With TWO sessions saved, perform IDOR and privilege escalation tests:
+  a) Load user_a session → browse to profile/resource → note the resource ID/URL
+     browser_action command=load_session session_name=user_a
+  b) Load user_b session → try to access user_a's resource by modifying the ID
+     browser_action command=load_session session_name=user_b
+     browser_action command=goto url=https://TARGET/api/resource/USER_A_ID
+  c) Compare responses — if user_b can see user_a's data → IDOR confirmed!
+  d) Test API endpoints too: use get_cookies after load_session and send_request with those cookies
+  e) Use list_sessions to see all saved sessions:
+     browser_action command=list_sessions
 
 IMPORTANT BROWSER TIPS:
 - ALWAYS use snapshot before interacting — it shows you the exact element IDs
@@ -1702,7 +1720,9 @@ IMPORTANT BROWSER TIPS:
 - Use submit instead of clicking — it auto-finds the submit button
 - Use wait text=navigation after form submissions to wait for redirects
 - Use get_cookies after login to capture session tokens for curl-based testing
-- Use save_session/load_session to persist login across browser restarts
+- Use save_session session_name=NAME to save multiple account sessions by name
+- Use load_session session_name=NAME to switch between accounts for IDOR testing
+- Use list_sessions to see all saved sessions (memory + disk)
 - If the page has iframes (e.g., CAPTCHA), use iframe/main_frame to switch context
 - Use extract_links to find all links on a page (useful for navigation)
 
