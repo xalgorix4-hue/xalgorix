@@ -3,21 +3,40 @@ package proxy
 
 import (
 	"bytes"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
-	"net/url"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/config"
+	"github.com/xalgord/xalgorix/v4/internal/proxy"
+	"github.com/xalgord/xalgorix/v4/internal/ratelimit"
 	"github.com/xalgord/xalgorix/v4/internal/tools"
 )
+
+// globalLimiter is initialised once from config when the package is loaded.
+// It is replaced by initLimiter() so tests can override it cleanly.
+var globalLimiter *ratelimit.Limiter
+
+func init() {
+	initLimiter()
+}
+
+func initLimiter() {
+	cfg := config.Get()
+	rps := cfg.RateLimitRPS
+	burst := cfg.RateLimitBurst
+	if rps <= 0 {
+		rps = 10
+	}
+	if burst <= 0 {
+		burst = 20
+	}
+	globalLimiter = ratelimit.New(rps, burst)
+}
 
 // Register adds proxy tools to the registry.
 func Register(r *tools.Registry) {
@@ -44,49 +63,22 @@ func Register(r *tools.Registry) {
 	})
 }
 
-func detectCaidoPort() int {
+// httpClient returns the best available *http.Client in priority order:
+//  1. The shared proxy-pool client from internal/proxy (honours
+//     XALGORIX_USE_PROXY and all rotation settings from PR #13).
+//  2. A plain direct client as fallback when the proxy pool is disabled
+//     or returns an error.
+//
+// TLSSkipVerify is driven by config instead of being hardcoded to true.
+func httpClient() *http.Client {
 	cfg := config.Get()
-	if cfg.CaidoPort > 0 {
-		return cfg.CaidoPort
-	}
-
-	// Check if Caido is running by looking for its process
-	out, err := exec.Command("ss", "-tlnp").Output()
-	if err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			// Only match lines that explicitly contain "caido" in the process name
-			if strings.Contains(strings.ToLower(line), "caido") {
-				parts := strings.Fields(line)
-				for _, p := range parts {
-					if strings.Contains(p, ":") {
-						addr := strings.Split(p, ":")
-						if port, err := strconv.Atoi(addr[len(addr)-1]); err == nil && port > 0 {
-							return port
-						}
-					}
-				}
-			}
+	if cfg.UseProxy {
+		if client, err := proxy.GetClient(); err == nil {
+			return client
 		}
 	}
-
-	// Try common Caido ports with a short timeout
-	checkClient := &http.Client{Timeout: 2 * time.Second}
-	for _, port := range []int{8080, 8081, 9090} {
-		resp, err := checkClient.Get(fmt.Sprintf("http://127.0.0.1:%d", port))
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode < 500 {
-				return port
-			}
-		}
-	}
-
-	return 8080
-}
-
-func getCaidoGraphQLURL() string {
-	port := detectCaidoPort()
-	return fmt.Sprintf("http://127.0.0.1:%d/graphql", port)
+	// Fallback: plain client with configurable TLS verification.
+	return proxy.NewDirectClient(cfg.TLSSkipVerify)
 }
 
 func parseHeaders(headersJSON string) (map[string]string, error) {
@@ -117,8 +109,12 @@ func clampRequestCount(raw string) int {
 }
 
 func sendRequest(args map[string]string) (tools.Result, error) {
-	method := strings.ToUpper(args["method"])
 	targetURL := args["url"]
+	method := strings.ToUpper(args["method"])
+
+	// Rate-limit before sending — blocks until a token is available for
+	// this domain. No-op when XALGORIX_RATE_RPS=0.
+	globalLimiter.Wait(targetURL)
 
 	var bodyReader io.Reader
 	if body := args["body"]; body != "" {
@@ -140,56 +136,8 @@ func sendRequest(args map[string]string) (tools.Result, error) {
 		}
 	}
 
-	caidoPort := detectCaidoPort()
-	usedProxy := false
-
-	// Check if Caido is accessible with a short timeout
-	checkClient := &http.Client{Timeout: 3 * time.Second}
-	checkResp, checkErr := checkClient.Get(fmt.Sprintf("http://127.0.0.1:%d", caidoPort))
-	if checkResp != nil {
-		checkResp.Body.Close()
-	}
-
-	var client *http.Client
-	if checkErr == nil && checkResp != nil && checkResp.StatusCode < 500 {
-		// Caido is running — route through proxy
-		proxyURLStr := fmt.Sprintf("http://127.0.0.1:%d", caidoPort)
-		proxyURL, err := url.Parse(proxyURLStr)
-		if err != nil {
-			log.Printf("Warning: failed to parse proxy URL %s: %v", proxyURLStr, err)
-			// Fall through to direct connection
-		} else {
-			client = &http.Client{
-				Timeout: 30 * time.Second,
-				Transport: &http.Transport{
-					Proxy:           http.ProxyURL(proxyURL),
-					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-				},
-			}
-			usedProxy = true
-		}
-	} else {
-		// Caido not available — use direct connection
-		client = &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		}
-	}
-
+	client := httpClient()
 	resp, err := client.Do(req)
-	if err != nil && usedProxy {
-		// Proxy failed — fall back to direct request
-		client = &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		}
-		resp, err = client.Do(req)
-		usedProxy = false
-	}
 	if err != nil {
 		return tools.Result{}, fmt.Errorf("request failed: %w", err)
 	}
@@ -201,10 +149,11 @@ func sendRequest(args map[string]string) (tools.Result, error) {
 	}
 
 	var b strings.Builder
-	if usedProxy {
-		b.WriteString(fmt.Sprintf("[via Caido proxy :%d]\n", caidoPort))
+	cfg := config.Get()
+	if cfg.UseProxy {
+		b.WriteString("[via proxy pool]\n")
 	} else {
-		b.WriteString("[direct request — Caido not available]\n")
+		b.WriteString("[direct request]\n")
 	}
 	b.WriteString(fmt.Sprintf("HTTP/%s %s\n", resp.Proto, resp.Status))
 	for k, vs := range resp.Header {
@@ -225,7 +174,7 @@ func sendRequest(args map[string]string) (tools.Result, error) {
 		Metadata: map[string]any{
 			"status_code": resp.StatusCode,
 			"url":         targetURL,
-			"via_proxy":   usedProxy,
+			"via_proxy":   cfg.UseProxy,
 		},
 	}, nil
 }
@@ -246,7 +195,7 @@ func listRequests(args map[string]string) (tools.Result, error) {
 		return tools.Result{Error: fmt.Sprintf("Failed to marshal GraphQL query: %v", err)}, nil
 	}
 
-	gqlURL := getCaidoGraphQLURL()
+	gqlURL := fmt.Sprintf("http://127.0.0.1:%d/graphql", caidoPort())
 	req, err := http.NewRequest(http.MethodPost, gqlURL, bytes.NewReader(body))
 	if err != nil {
 		return tools.Result{Error: fmt.Sprintf("Failed to create GraphQL request: %v", err)}, nil
@@ -266,4 +215,12 @@ func listRequests(args map[string]string) (tools.Result, error) {
 		return tools.Result{Error: fmt.Sprintf("Failed to read Caido response: %v", err)}, nil
 	}
 	return tools.Result{Output: string(respBody)}, nil
+}
+
+// caidoPort returns the configured or auto-detected Caido port.
+func caidoPort() int {
+	if p := config.Get().CaidoPort; p > 0 {
+		return p
+	}
+	return 8080
 }
