@@ -13,14 +13,14 @@ import (
 // ── Hook Events ──────────────────────────────────────────────────────────────
 
 const (
-	OnToolCall       = "OnToolCall"       // Before every tool execution
-	OnToolResult     = "OnToolResult"     // After every tool execution
-	OnFinishAttempt  = "OnFinishAttempt"  // When agent calls finish
-	OnStuckCheck     = "OnStuckCheck"     // After stuck-loop counter updates (every tool call)
-	OnEmptyResponse  = "OnEmptyResponse"  // When LLM returns empty
-	OnNoToolResponse = "OnNoToolResponse" // When LLM responds without tools
-	OnIterationStart = "OnIterationStart" // At the start of each iteration
-	OnContextPrune   = "OnContextPrune"   // After message history is pruned
+	OnToolCall        = "OnToolCall"        // Before every tool execution
+	OnToolResult      = "OnToolResult"      // After every tool execution
+	OnFinishAttempt   = "OnFinishAttempt"   // When agent calls finish
+	OnStuckCheck      = "OnStuckCheck"      // After stuck-loop counter updates (every tool call)
+	OnEmptyResponse   = "OnEmptyResponse"   // When LLM returns empty
+	OnNoToolResponse  = "OnNoToolResponse"  // When LLM responds without tools
+	OnIterationStart  = "OnIterationStart"  // At the start of each iteration
+	OnContextPrune    = "OnContextPrune"    // After message history is pruned
 	OnHealthyResponse = "OnHealthyResponse" // After a non-empty response with tool calls (resets error counters)
 )
 
@@ -40,15 +40,17 @@ type ScanState struct {
 	ScannerUsed         bool
 	FinishAttempts      int
 	DiscoveryMode       bool
+	ReconOnlyMode       bool
+	AllowedPhases       []int
 
 	// Stuck-loop detection
-	StuckDomain          string
-	StuckIterations      int
-	ConsecutiveBrowser   int
-	ConsecutiveSearch    int
-	ConsecutiveErrors    int
-	EmptyResponseCount   int
-	NoToolCount          int
+	StuckDomain        string
+	StuckIterations    int
+	ConsecutiveBrowser int
+	ConsecutiveSearch  int
+	ConsecutiveErrors  int
+	EmptyResponseCount int
+	NoToolCount        int
 
 	// New enrichment hooks
 	WAFDetected          bool
@@ -70,12 +72,12 @@ func NewScanState() *ScanState {
 // Multiple hooks fire per event; results are merged (first non-empty wins for strings,
 // OR logic for bools).
 type HookResult struct {
-	Nudge       string // message to inject into conversation
-	Block       bool   // prevent the action (e.g., block finish)
-	BlockReason string // why it was blocked
-	ForceSkip   bool   // skip current tool call
-	EmitMessage string // emit to UI without injecting into conversation
-	CleanupBrowser bool // signal to force-close browser
+	Nudge          string // message to inject into conversation
+	Block          bool   // prevent the action (e.g., block finish)
+	BlockReason    string // why it was blocked
+	ForceSkip      bool   // skip current tool call
+	EmitMessage    string // emit to UI without injecting into conversation
+	CleanupBrowser bool   // signal to force-close browser
 }
 
 // ── Hook Registry ────────────────────────────────────────────────────────────
@@ -279,6 +281,10 @@ func hookStuckTracker(state *ScanState, args map[string]string) HookResult {
 // Fires on OnStuckCheck. Produces soft nudge or hard force-skip based on
 // stuck counters accumulated by hookStuckTracker.
 func hookStuckNudge(state *ScanState, args map[string]string) HookResult {
+	if state.ReconOnlyMode {
+		return HookResult{}
+	}
+
 	// Hard limit: force-skip after too many stuck iterations
 	if state.StuckIterations >= StuckHardLimit {
 		forceMsg := fmt.Sprintf(`⛔ EXHAUSTION LIMIT: You have spent %d iterations on %q. You have exhausted browser-based approaches for this target. Close the browser and:
@@ -411,6 +417,12 @@ func hookFinishGatekeeper(state *ScanState, args map[string]string) HookResult {
 	// Discovery mode (Phase 1 enumeration): allow finish after minimum work
 	if state.DiscoveryMode {
 		if state.TerminalCalls < 3 {
+			if state.ReconOnlyMode {
+				return HookResult{
+					Block:       true,
+					BlockReason: fmt.Sprintf("Recon-only scan: only %d commands executed. Run at least 3 reconnaissance tools (for example dig/nslookup, nmap/naabu, httpx/whatweb/curl -I) before finishing.", state.TerminalCalls),
+				}
+			}
 			return HookResult{
 				Block:       true,
 				BlockReason: fmt.Sprintf("Discovery phase: only %d commands executed. Run at least 3 enumeration tools (subfinder, crt.sh, findomain, assetfinder) before finishing.", state.TerminalCalls),
@@ -578,6 +590,10 @@ Call a tool NOW in your next response.`,
 // On iteration start, suggests loading skills if techs have been detected
 // but no skills have been loaded yet. Only fires once, at iteration 15.
 func hookAutoSkillSuggester(state *ScanState, args map[string]string) HookResult {
+	if state.ReconOnlyMode {
+		return HookResult{}
+	}
+
 	// Fire once at iteration >= 15 — early enough to help, late enough to have tech data
 	if state.Iteration < 15 || state.SkillSuggestionFired {
 		return HookResult{}

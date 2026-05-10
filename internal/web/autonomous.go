@@ -202,45 +202,39 @@ func buildPhaseFilterInstruction(phases []int) string {
 		return ""
 	}
 
-	// Map phase numbers to human-readable names for clarity
-	phaseNames := map[int]string{
-		1:  "Deep Reconnaissance & Attack Surface Mapping",
-		2:  "Manual Vulnerability Discovery",
-		3:  "Directory & File Discovery",
-		4:  "CORS & Cookie Analysis",
-		5:  "Authentication & Session Testing",
-		6:  "Injection Testing",
-		7:  "SSRF Testing",
-		8:  "IDOR & Broken Access Control",
-		9:  "API & GraphQL Testing",
-		10: "File Upload Testing",
-		11: "Deserialization & RCE",
-		12: "Race Conditions & Business Logic",
-		13: "Subdomain Takeover",
-		14: "Open Redirect Testing",
-		15: "Email Security Testing",
-		16: "Cloud & Infrastructure",
-		17: "WebSocket Testing",
-		18: "CMS-Specific Testing",
-		19: "Broken Link Hijacking & Content Spoofing",
-		20: "Exploit Verification",
-		21: "Zero-Day & Novel Vulnerability Discovery",
-		22: "Final Report",
-	}
-
 	instruction := "\n\n## ⚠️ PHASE RESTRICTION (MANDATORY — DO NOT IGNORE)\n"
 	instruction += "You are RESTRICTED to ONLY the following methodology phases. "
 	instruction += "SKIP ALL phases not listed below. Do NOT perform work from excluded phases.\n\n"
 	instruction += "**Allowed phases:**\n"
 	for _, p := range phases {
-		name, ok := phaseNames[p]
+		name, ok := methodologyPhaseNames[p]
 		if !ok {
 			name = "Unknown"
 		}
 		instruction += fmt.Sprintf("- Phase %d: %s\n", p, name)
 	}
 	instruction += "\n**All other phases are OUT OF SCOPE for this scan. Skip them entirely.**\n"
-	instruction += "After completing the allowed phases, proceed directly to the Final Report phase.\n"
+	if isReconReportOnlyPhaseSelection(phases) {
+		instruction += `
+## RECONNAISSANCE-ONLY SCOPE
+This selection means reconnaissance plus reporting only. Do NOT run vulnerability scanners, exploit searches, proof-of-concept payloads, SQLi/XSS/SSRF/IDOR tests, or exploit verification.
+
+Reconnaissance should collect and summarize:
+- DNS records: A, AAAA, CNAME, MX, NS, TXT, SOA where available
+- Resolved IP addresses and hostnames
+- Open ports, detected services, and service versions where safely discoverable
+- HTTP status, headers, TLS/certificate metadata, WAF/CDN hints
+- Technology fingerprints, frameworks, CMS, JavaScript frameworks, server software
+- URLs/endpoints discovered passively or by crawling without exploit payloads
+
+If you notice a possible vulnerability during recon, record it as an observation only. Do not exploit it, do not call report_vulnerability, and do not escalate into excluded vulnerability phases.
+`
+	}
+	if !phaseAllowed(phases, 22) {
+		instruction += "After completing the allowed phases, call finish with a concise summary. Do not enter the Final Report phase unless it was selected.\n"
+	} else {
+		instruction += "After completing the allowed non-report phases, proceed directly to the Final Report phase.\n"
+	}
 	return instruction
 }
 

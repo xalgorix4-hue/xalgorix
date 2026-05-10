@@ -37,6 +37,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/xalgord/xalgorix/v4/internal/agent"
 	"github.com/xalgord/xalgorix/v4/internal/config"
+	"github.com/xalgord/xalgorix/v4/internal/llm"
 	"github.com/xalgord/xalgorix/v4/internal/resources"
 	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 	"github.com/xalgord/xalgorix/v4/internal/tools/agentsgraph"
@@ -618,6 +619,7 @@ type WSEvent struct {
 	SubTargetIndex int               `json:"sub_target_index,omitempty"` // subdomain index within a wildcard target
 	SubTargetTotal int               `json:"sub_target_total,omitempty"` // total subdomains for current wildcard target
 	ParentTarget   string            `json:"parent_target,omitempty"`    // parent domain for subdomain scans
+	CurrentPhase   int               `json:"current_phase,omitempty"`    // inferred active methodology phase
 }
 
 // VulnSummary is a simplified vulnerability for the UI.
@@ -662,6 +664,7 @@ type ScanRecord struct {
 	CompanyName    string        `json:"company_name,omitempty"` // report branding: company name
 	LogoPath       string        `json:"logo_path,omitempty"`    // report branding: logo path
 	Phases         []int         `json:"phases,omitempty"`       // selected methodology phases
+	CurrentPhase   int           `json:"current_phase,omitempty"`
 }
 
 // QueueState persists scan queue state for recovery after restart
@@ -696,11 +699,14 @@ type ScanInstance struct {
 	LogoPath          string        `json:"logo_path,omitempty"`       // report branding: logo path
 	DiscordWebhook    string        `json:"-"`                         // discord webhook (not exposed to API)
 	Vulns             []VulnSummary `json:"vulns,omitempty"`
+	CurrentPhase      int           `json:"current_phase,omitempty"`
 	agent             *agent.Agent
 	cancel            context.CancelFunc
 	scanDir           string
 	sctx              *scanctx.ScanContext // per-instance session state (vulns, notes, terminal, browser)
 	events            []WSEvent            // buffered events for replay
+	chatCfg           *config.Config       // provider settings for post-scan chat (not exposed)
+	chatMessages      []llm.Message        // lightweight post-scan chat history (not exposed)
 	mu                sync.RWMutex
 	lastSessionTokens int // tracks token count from current session for delta calculation
 }
@@ -813,6 +819,7 @@ type Server struct {
 	rateLimiter        *RateLimiter
 	instances          map[string]*ScanInstance // concurrent scan instances
 	instancesMu        sync.RWMutex
+	postScanChatFn     func(*config.Config, []llm.Message) (string, error)
 }
 
 // NewServer creates a new web server.
@@ -836,6 +843,11 @@ func NewServer(cfg *config.Config, port int) *Server {
 		discordMinSeverity: strings.ToLower(strings.TrimSpace(os.Getenv("XALGORIX_DISCORD_MIN_SEVERITY"))),
 		rateLimiter:        rl,
 		instances:          make(map[string]*ScanInstance),
+		postScanChatFn: func(cfg *config.Config, messages []llm.Message) (string, error) {
+			client := llm.NewClient(cfg)
+			client.SetContext(context.Background())
+			return client.Chat(messages)
+		},
 	}
 
 	// Rebuild instances map from disk so dashboard shows historical scans on startup
@@ -1139,10 +1151,13 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 			Instruction:    req.Instruction,
 			SeverityFilter: req.SeverityFilter,
 			Phases:         req.Phases,
+			CurrentPhase:   firstSelectedPhase(req.Phases),
 			CompanyName:    req.CompanyName,
 			LogoPath:       req.LogoPath,
 			DiscordWebhook: req.DiscordWebhook,
 		}
+		chatCfg := scanCfg
+		inst.chatCfg = &chatCfg
 		s.instancesMu.Lock()
 		s.instances[instanceID] = inst
 		s.instancesMu.Unlock()
@@ -1163,6 +1178,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 				Instruction:    req.Instruction,
 				SeverityFilter: req.SeverityFilter,
 				Phases:         req.Phases,
+				CurrentPhase:   firstSelectedPhase(req.Phases),
 				CompanyName:    req.CompanyName,
 				LogoPath:       req.LogoPath,
 				DiscordWebhook: req.DiscordWebhook,
@@ -1248,10 +1264,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Count running instances
 	s.instancesMu.RLock()
 	runningCount := 0
+	runningInstanceID := ""
+	currentPhase := 0
 	for _, inst := range s.instances {
 		inst.mu.RLock()
 		if inst.Status == "running" {
 			runningCount++
+			if runningInstanceID == "" {
+				runningInstanceID = inst.ID
+				currentPhase = inst.CurrentPhase
+			}
 		}
 		inst.mu.RUnlock()
 	}
@@ -1272,6 +1294,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"running":           s.running.Load() || runningCount > 0,
 		"scan_id":           scanID,
+		"instance_id":       runningInstanceID,
+		"current_phase":     currentPhase,
 		"vulns":             totalVulns,
 		"running_instances": runningCount,
 	})
@@ -1285,20 +1309,23 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 	for _, inst := range s.instances {
 		inst.mu.RLock()
 		instances = append(instances, &ScanInstance{
-			ID:          inst.ID,
-			Name:        inst.Name,
-			Targets:     inst.Targets,
-			Status:      inst.Status,
-			StartedAt:   inst.StartedAt,
-			FinishedAt:  inst.FinishedAt,
-			Iterations:  inst.Iterations,
-			ToolCalls:   inst.ToolCalls,
-			VulnCount:   inst.VulnCount,
-			TotalTokens: inst.TotalTokens,
-			ScanMode:    inst.ScanMode,
-			Phases:      inst.Phases,
-			CompanyName: inst.CompanyName,
-			LogoPath:    inst.LogoPath,
+			ID:             inst.ID,
+			Name:           inst.Name,
+			Targets:        inst.Targets,
+			Status:         inst.Status,
+			StartedAt:      inst.StartedAt,
+			FinishedAt:     inst.FinishedAt,
+			Iterations:     inst.Iterations,
+			ToolCalls:      inst.ToolCalls,
+			VulnCount:      inst.VulnCount,
+			TotalTokens:    inst.TotalTokens,
+			ScanMode:       inst.ScanMode,
+			Instruction:    inst.Instruction,
+			SeverityFilter: append([]string(nil), inst.SeverityFilter...),
+			Phases:         inst.Phases,
+			CompanyName:    inst.CompanyName,
+			LogoPath:       inst.LogoPath,
+			CurrentPhase:   inst.CurrentPhase,
 		})
 		inst.mu.RUnlock()
 	}
@@ -1582,26 +1609,29 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 // scanSession isolates all per-scan state. Crashes in one session
 // cannot corrupt server-level state or leak into subsequent scans.
 type scanSession struct {
-	id             string
-	target         string
-	parentTarget   string // parent domain for subdomain scans (wildcard mode)
-	scanDir        string
-	cfg            *config.Config
-	agent          *agent.Agent
-	events         chan agent.Event
-	record         *ScanRecord
-	server         *Server
-	instruction    string
-	severityFilter []string
-	discoveryMode  bool
-	genReport      bool
-	resetState     bool
-	instanceID     string               // parent instance ID for multi-instance tracking
-	scanMode       string               // single, wildcard, dast — persisted so dashboard shows correct mode
-	sctx           *scanctx.ScanContext // per-session isolated state
-	companyName    string               // report branding: company name
-	logoPath       string               // report branding: logo path
-	phases         []int                // selected methodology phases
+	id              string
+	target          string
+	parentTarget    string // parent domain for subdomain scans (wildcard mode)
+	scanDir         string
+	cfg             *config.Config
+	agent           *agent.Agent
+	events          chan agent.Event
+	record          *ScanRecord
+	server          *Server
+	instruction     string
+	name            string
+	userInstruction string
+	severityFilter  []string
+	discordWebhook  string
+	discoveryMode   bool
+	genReport       bool
+	resetState      bool
+	instanceID      string               // parent instance ID for multi-instance tracking
+	scanMode        string               // single, wildcard, dast — persisted so dashboard shows correct mode
+	sctx            *scanctx.ScanContext // per-session isolated state
+	companyName     string               // report branding: company name
+	logoPath        string               // report branding: logo path
+	phases          []int                // selected methodology phases
 
 	// Wildcard lifecycle flags
 	skipNotesCleanup     bool   // when true, don't delete notes store on cleanup (discovery phase)
@@ -1772,7 +1802,8 @@ func (s *Server) executeScanSession(sess *scanSession) {
 	events := make(chan agent.Event, 512)
 	sess.events = events
 	agnt := agent.NewAgent(sess.cfg, "XalgorixAgent", events, sctx)
-	if sess.discoveryMode {
+	agnt.SetPhaseRestrictions(sess.phases)
+	if sess.discoveryMode || isReconReportOnlyPhaseSelection(sess.phases) {
 		agnt.SetDiscoveryMode(true)
 	}
 	sess.agent = agnt
@@ -1799,17 +1830,22 @@ func (s *Server) executeScanSession(sess *scanSession) {
 
 	// 4. Initialize scan record
 	sess.record = &ScanRecord{
-		ID:           sess.id,
-		Target:       sess.target,
-		ParentTarget: sess.parentTarget,
-		ScanMode:     sess.scanMode,
-		StartedAt:    time.Now().Format(time.RFC3339),
-		Status:       "running",
-		Events:       []WSEvent{},
-		Vulns:        []VulnSummary{},
-		CompanyName:  sess.companyName,
-		LogoPath:     sess.logoPath,
-		Phases:       sess.phases,
+		ID:             sess.id,
+		Name:           sess.name,
+		Target:         sess.target,
+		ParentTarget:   sess.parentTarget,
+		ScanMode:       sess.scanMode,
+		Instruction:    sess.userInstruction,
+		SeverityFilter: append([]string(nil), sess.severityFilter...),
+		DiscordWebhook: sess.discordWebhook,
+		StartedAt:      time.Now().Format(time.RFC3339),
+		Status:         "running",
+		Events:         []WSEvent{},
+		Vulns:          []VulnSummary{},
+		CompanyName:    sess.companyName,
+		LogoPath:       sess.logoPath,
+		Phases:         append([]int(nil), sess.phases...),
+		CurrentPhase:   firstSelectedPhase(sess.phases),
 	}
 	s.saveScanRecordTo(sess.record, sess.scanDir)
 
@@ -1867,7 +1903,11 @@ func (s *Server) executeScanSession(sess *scanSession) {
 				s.sendDiscordWithFile(0x2dd4bf, "✅ Scan Finished - Clean Report", desc, p)
 			}
 			if sess.instanceID != "" {
-				s.broadcastToInstance(sess.instanceID, WSEvent{Type: "report_ready", Content: fmt.Sprintf("/api/report/%s", sess.id)})
+				reportEvt := WSEvent{Type: "report_ready", Content: fmt.Sprintf("/api/report/%s", sess.id)}
+				if phaseAllowed(sess.phases, 22) {
+					reportEvt.CurrentPhase = 22
+				}
+				s.broadcastToInstance(sess.instanceID, reportEvt)
 			} else {
 				s.broadcast(WSEvent{Type: "report_ready", Content: fmt.Sprintf("/api/report/%s", sess.id)})
 			}
@@ -1972,6 +2012,13 @@ func (s *Server) processEvent(evt agent.Event, sess *scanSession) {
 					log.Printf("[VULN] Vuln filtered out by severity: %s (filter: %v)", vs.Severity, sess.severityFilter)
 				}
 			}
+		}
+	}
+
+	if phase := inferCurrentPhase(wsEvt, sess.phases); phase > 0 {
+		wsEvt.CurrentPhase = phase
+		if sess.record != nil {
+			sess.record.CurrentPhase = phase
 		}
 	}
 
@@ -2084,6 +2131,149 @@ func buildSeverityPrefix(severityFilter []string) string {
 	return severityText
 }
 
+func firstSelectedPhase(phases []int) int {
+	if len(phases) == 0 {
+		return 1
+	}
+	first := 0
+	for _, phase := range phases {
+		if phase < 1 || phase > 22 {
+			continue
+		}
+		if first == 0 || phase < first {
+			first = phase
+		}
+	}
+	if first == 0 {
+		return 1
+	}
+	return first
+}
+
+func phaseAllowed(phases []int, phase int) bool {
+	if phase < 1 || phase > 22 {
+		return false
+	}
+	if len(phases) == 0 {
+		return true
+	}
+	for _, allowed := range phases {
+		if allowed == phase {
+			return true
+		}
+	}
+	return false
+}
+
+func isReconReportOnlyPhaseSelection(phases []int) bool {
+	if len(phases) == 0 {
+		return false
+	}
+	for _, phase := range phases {
+		if phase != 1 && phase != 22 {
+			return false
+		}
+	}
+	return true
+}
+
+var phaseMentionRe = regexp.MustCompile(`(?i)\bphase\s+([0-9]{1,2})\b`)
+
+func inferCurrentPhase(evt WSEvent, allowed []int) int {
+	if phase := parsePhaseMention(evt.Content); phaseAllowed(allowed, phase) {
+		return phase
+	}
+	switch evt.Type {
+	case "queue_started", "target_started", "scan_started":
+		return firstSelectedPhase(allowed)
+	case "finished", "queue_finished", "report_ready":
+		if phaseAllowed(allowed, 22) {
+			return 22
+		}
+	}
+
+	if evt.Type != "tool_call" {
+		return 0
+	}
+	tool := strings.ToLower(evt.ToolName)
+	args := strings.ToLower(strings.Join(mapValues(evt.ToolArgs), " "))
+
+	switch {
+	case tool == "finish" || tool == "report_vulnerability":
+		if phaseAllowed(allowed, 22) {
+			return 22
+		}
+	case strings.Contains(args, "sqlmap") || strings.Contains(args, "dalfox") ||
+		strings.Contains(args, "union select") || strings.Contains(args, "<script") ||
+		strings.Contains(args, "sleep("):
+		if phaseAllowed(allowed, 6) {
+			return 6
+		}
+	case strings.Contains(args, "ffuf") || strings.Contains(args, "gobuster") ||
+		strings.Contains(args, "dirsearch") || strings.Contains(args, "feroxbuster"):
+		if phaseAllowed(allowed, 3) {
+			return 3
+		}
+	case strings.Contains(args, "ssrf") || strings.Contains(args, "169.254.169.254"):
+		if phaseAllowed(allowed, 7) {
+			return 7
+		}
+	case strings.Contains(args, "idor") || strings.Contains(args, "authorization") ||
+		strings.Contains(args, "role=admin"):
+		if phaseAllowed(allowed, 8) {
+			return 8
+		}
+	case strings.Contains(args, "graphql") || strings.Contains(args, "/api/"):
+		if phaseAllowed(allowed, 9) {
+			return 9
+		}
+	case strings.Contains(args, "cors") || strings.Contains(args, "cookie"):
+		if phaseAllowed(allowed, 4) {
+			return 4
+		}
+	case strings.Contains(args, "login") || strings.Contains(args, "session") ||
+		strings.Contains(args, "agentmail"):
+		if phaseAllowed(allowed, 5) {
+			return 5
+		}
+	case strings.Contains(args, "nmap") || strings.Contains(args, "naabu") ||
+		strings.Contains(args, "masscan") || strings.Contains(args, "dig ") ||
+		strings.Contains(args, "nslookup") || strings.Contains(args, "host ") ||
+		strings.Contains(args, "whatweb") || strings.Contains(args, "wappalyzer") ||
+		strings.Contains(args, "httpx") || strings.Contains(args, "wafw00f") ||
+		strings.Contains(args, "subfinder") || strings.Contains(args, "amass") ||
+		strings.Contains(args, "crt.sh"):
+		if phaseAllowed(allowed, 1) {
+			return 1
+		}
+	}
+
+	return 0
+}
+
+func parsePhaseMention(text string) int {
+	match := phaseMentionRe.FindStringSubmatch(text)
+	if len(match) != 2 {
+		return 0
+	}
+	var phase int
+	if _, err := fmt.Sscanf(match[1], "%d", &phase); err != nil {
+		return 0
+	}
+	if phase < 1 || phase > 22 {
+		return 0
+	}
+	return phase
+}
+
+func mapValues(values map[string]string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, value)
+	}
+	return out
+}
+
 // ────────────────────────────────────────────────────────
 // runMultiScan — orchestrates scanning across all targets
 // ────────────────────────────────────────────────────────
@@ -2137,10 +2327,13 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		Instruction:    req.Instruction,
 		SeverityFilter: req.SeverityFilter,
 		Phases:         req.Phases,
+		CurrentPhase:   firstSelectedPhase(req.Phases),
 		CompanyName:    req.CompanyName,
 		LogoPath:       req.LogoPath,
 		DiscordWebhook: req.DiscordWebhook,
 	}
+	chatCfg := *scanCfg
+	instance.chatCfg = &chatCfg
 	s.instancesMu.Lock()
 	s.instances[instanceID] = instance
 	s.instancesMu.Unlock()
@@ -2169,6 +2362,9 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 			instance.Status = "finished"
 		}
 		instance.FinishedAt = time.Now().Format(time.RFC3339)
+		instance.agent = nil
+		instance.cancel = nil
+		instance.sctx = nil
 		instance.mu.Unlock()
 
 		// Full post-scan cleanup only when the scan actually ran.
@@ -2198,7 +2394,11 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		}
 		s.mu.Unlock()
 
-		s.broadcastToInstance(instanceID, WSEvent{Type: "queue_finished", Content: "Scan queue ended"})
+		queueDoneEvt := WSEvent{Type: "queue_finished", Content: "Scan queue ended"}
+		if phaseAllowed(req.Phases, 22) {
+			queueDoneEvt.CurrentPhase = 22
+		}
+		s.broadcastToInstance(instanceID, queueDoneEvt)
 		s.broadcastDashboard(WSEvent{Type: "instance_updated", Content: instanceID})
 		time.Sleep(500 * time.Millisecond)
 
@@ -2316,6 +2516,7 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 		Type:         "queue_started",
 		Content:      fmt.Sprintf("Starting scan queue: %d target(s)", totalTargets),
 		TotalTargets: totalTargets,
+		CurrentPhase: firstSelectedPhase(req.Phases),
 	})
 
 	// Discord: scan started
@@ -2420,24 +2621,28 @@ func (s *Server) runSingleTarget(_ context.Context, scanCfg *config.Config, req 
 		AgentID:      filepath.Base(scanDir),
 		TargetIndex:  idx + 1,
 		TotalTargets: total,
+		CurrentPhase: firstSelectedPhase(req.Phases),
 	})
 
 	sess := &scanSession{
-		id:             filepath.Base(scanDir),
-		target:         target,
-		scanDir:        scanDir,
-		cfg:            scanCfg,
-		server:         s,
-		instruction:    buildAutonomousInstruction(target, instruction),
-		severityFilter: req.SeverityFilter,
-		discoveryMode:  false,
-		genReport:      true,
-		resetState:     true,
-		instanceID:     req.InstanceID,
-		scanMode:       "single",
-		companyName:    req.CompanyName,
-		logoPath:       req.LogoPath,
-		phases:         req.Phases,
+		id:              filepath.Base(scanDir),
+		target:          target,
+		scanDir:         scanDir,
+		cfg:             scanCfg,
+		server:          s,
+		instruction:     buildAutonomousInstruction(target, instruction),
+		name:            req.Name,
+		userInstruction: req.Instruction,
+		severityFilter:  req.SeverityFilter,
+		discordWebhook:  req.DiscordWebhook,
+		discoveryMode:   false,
+		genReport:       true,
+		resetState:      true,
+		instanceID:      req.InstanceID,
+		scanMode:        "single",
+		companyName:     req.CompanyName,
+		logoPath:        req.LogoPath,
+		phases:          req.Phases,
 	}
 	s.executeScanSession(sess)
 
@@ -2467,24 +2672,28 @@ func (s *Server) runDASTTarget(_ context.Context, scanCfg *config.Config, req Sc
 		AgentID:      filepath.Base(scanDir),
 		TargetIndex:  idx + 1,
 		TotalTargets: total,
+		CurrentPhase: firstSelectedPhase(req.Phases),
 	})
 
 	sess := &scanSession{
-		id:             filepath.Base(scanDir),
-		target:         target,
-		scanDir:        scanDir,
-		cfg:            scanCfg,
-		server:         s,
-		instruction:    dastInstruction,
-		severityFilter: req.SeverityFilter,
-		discoveryMode:  false,
-		genReport:      true,
-		resetState:     true,
-		instanceID:     req.InstanceID,
-		scanMode:       "dast",
-		companyName:    req.CompanyName,
-		logoPath:       req.LogoPath,
-		phases:         req.Phases,
+		id:              filepath.Base(scanDir),
+		target:          target,
+		scanDir:         scanDir,
+		cfg:             scanCfg,
+		server:          s,
+		instruction:     dastInstruction,
+		name:            req.Name,
+		userInstruction: req.Instruction,
+		severityFilter:  req.SeverityFilter,
+		discordWebhook:  req.DiscordWebhook,
+		discoveryMode:   false,
+		genReport:       true,
+		resetState:      true,
+		instanceID:      req.InstanceID,
+		scanMode:        "dast",
+		companyName:     req.CompanyName,
+		logoPath:        req.LogoPath,
+		phases:          req.Phases,
 	}
 	s.executeScanSession(sess)
 
@@ -2525,6 +2734,7 @@ func (s *Server) runWildcardTarget(_ context.Context, scanCfg *config.Config, re
 		AgentID:      filepath.Base(scanDir),
 		TargetIndex:  idx + 1,
 		TotalTargets: total,
+		CurrentPhase: 1,
 	})
 
 	// Save the discovery session's context ID so we can read notes after cleanup.
@@ -2537,7 +2747,10 @@ func (s *Server) runWildcardTarget(_ context.Context, scanCfg *config.Config, re
 		cfg:              scanCfg,
 		server:           s,
 		instruction:      discoveryInstruction,
+		name:             req.Name,
+		userInstruction:  req.Instruction,
 		severityFilter:   req.SeverityFilter,
+		discordWebhook:   req.DiscordWebhook,
 		discoveryMode:    true,
 		genReport:        false,
 		resetState:       true,
@@ -2638,6 +2851,7 @@ func (s *Server) runWildcardTarget(_ context.Context, scanCfg *config.Config, re
 				SubTargetIndex: j + 1,
 				SubTargetTotal: len(subdomains),
 				ParentTarget:   target,
+				CurrentPhase:   firstSelectedPhase(req.Phases),
 			})
 
 			// Track vulns BEFORE this subdomain scan using the stable parent context
@@ -2651,7 +2865,10 @@ func (s *Server) runWildcardTarget(_ context.Context, scanCfg *config.Config, re
 				cfg:                  scanCfg,
 				server:               s,
 				instruction:          scanInstruction,
+				name:                 req.Name,
+				userInstruction:      req.Instruction,
 				severityFilter:       req.SeverityFilter,
+				discordWebhook:       req.DiscordWebhook,
 				discoveryMode:        false,
 				genReport:            false,
 				resetState:           false, // accumulate vulns across subdomains
@@ -2671,13 +2888,22 @@ func (s *Server) runWildcardTarget(_ context.Context, scanCfg *config.Config, re
 				newVulns := allVulns[vulnCountBefore:]
 				if len(newVulns) > 0 {
 					subScanRecord := ScanRecord{
-						ID:           filepath.Base(subScanDir),
-						Target:       subdomain,
-						ParentTarget: target,
-						StartedAt:    time.Now().Format(time.RFC3339),
-						Status:       "finished",
-						FinishedAt:   time.Now().Format(time.RFC3339),
-						Vulns:        []VulnSummary{},
+						ID:             filepath.Base(subScanDir),
+						Name:           req.Name,
+						Target:         subdomain,
+						ParentTarget:   target,
+						ScanMode:       "wildcard",
+						Instruction:    req.Instruction,
+						SeverityFilter: append([]string(nil), req.SeverityFilter...),
+						DiscordWebhook: req.DiscordWebhook,
+						StartedAt:      time.Now().Format(time.RFC3339),
+						Status:         "finished",
+						FinishedAt:     time.Now().Format(time.RFC3339),
+						Vulns:          []VulnSummary{},
+						CompanyName:    req.CompanyName,
+						LogoPath:       req.LogoPath,
+						Phases:         append([]int(nil), req.Phases...),
+						CurrentPhase:   22,
 					}
 					for _, v := range newVulns {
 						subScanRecord.Vulns = append(subScanRecord.Vulns, vulnToSummary(v))
@@ -3381,6 +3607,45 @@ func (s *Server) findScanByID(scanID string) (string, *ScanRecord) {
 	return "", nil
 }
 
+func scanRecordFromInstance(inst *ScanInstance) *ScanRecord {
+	if inst == nil {
+		return nil
+	}
+	inst.mu.RLock()
+	defer inst.mu.RUnlock()
+
+	events := make([]WSEvent, len(inst.events))
+	copy(events, inst.events)
+	vulns := make([]VulnSummary, len(inst.Vulns))
+	copy(vulns, inst.Vulns)
+	phases := append([]int(nil), inst.Phases...)
+	severityFilter := append([]string(nil), inst.SeverityFilter...)
+
+	return &ScanRecord{
+		ID:             inst.ID,
+		Name:           inst.Name,
+		Target:         inst.Targets,
+		ParentTarget:   inst.ParentTarget,
+		StartedAt:      inst.StartedAt,
+		FinishedAt:     inst.FinishedAt,
+		Status:         inst.Status,
+		StopReason:     inst.StopReason,
+		ScanMode:       inst.ScanMode,
+		Instruction:    inst.Instruction,
+		SeverityFilter: severityFilter,
+		DiscordWebhook: inst.DiscordWebhook,
+		Events:         events,
+		Vulns:          vulns,
+		TotalTokens:    inst.TotalTokens,
+		Iterations:     inst.Iterations,
+		ToolCalls:      inst.ToolCalls,
+		CompanyName:    inst.CompanyName,
+		LogoPath:       inst.LogoPath,
+		Phases:         phases,
+		CurrentPhase:   inst.CurrentPhase,
+	}
+}
+
 // rebuildInstancesFromDisk populates s.instances from all saved scan.json files on disk.
 // This ensures the dashboard shows historical scans immediately after server restart.
 // Skips subdomain scans (those with ParentTarget set) — those are shown under their parent.
@@ -3411,7 +3676,15 @@ func (s *Server) rebuildInstancesFromDisk() {
 			CompanyName:    entry.rec.CompanyName,
 			LogoPath:       entry.rec.LogoPath,
 			DiscordWebhook: entry.rec.DiscordWebhook,
+			Vulns:          entry.rec.Vulns,
+			CurrentPhase:   entry.rec.CurrentPhase,
+			events:         append([]WSEvent(nil), entry.rec.Events...),
 		}
+		if inst.CurrentPhase == 0 {
+			inst.CurrentPhase = firstSelectedPhase(inst.Phases)
+		}
+		chatCfg := *s.cfg
+		inst.chatCfg = &chatCfg
 		// If scan was "running" from a previous server instance, it's no longer active
 		if inst.Status == "running" {
 			inst.Status = "stopped"
@@ -3464,8 +3737,19 @@ func (s *Server) handleDownloadReport(w http.ResponseWriter, r *http.Request) {
 
 	scanDir, rec := s.findScanByID(scanID)
 	if scanDir == "" || rec == nil {
-		http.Error(w, "scan not found", http.StatusNotFound)
-		return
+		s.instancesMu.RLock()
+		inst := s.instances[scanID]
+		s.instancesMu.RUnlock()
+		if inst != nil {
+			rec = scanRecordFromInstance(inst)
+			inst.mu.RLock()
+			scanDir = inst.scanDir
+			inst.mu.RUnlock()
+		}
+		if scanDir == "" || rec == nil {
+			http.Error(w, "scan not found", http.StatusNotFound)
+			return
+		}
 	}
 
 	reportPath := filepath.Join(scanDir, fmt.Sprintf("xalgorix_report_%s.pdf", scanID))
@@ -3690,6 +3974,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	req.Message = strings.TrimSpace(req.Message)
 	if req.Message == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -3697,34 +3982,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// BUG FIX: Use the explicitly provided instance_id to route chat messages
-	// to the correct agent. Previously, `s.currentScanID` (a global) was always
-	// used, so chat messages in multi-scan mode always went to the last-started
-	// scan regardless of which instance the user was viewing.
-	targetID := req.InstanceID
-	if targetID == "" {
-		// Fallback to global for single-instance backwards compatibility
-		s.mu.RLock()
-		targetID = s.currentScanID
-		s.mu.RUnlock()
-	}
-
-	// Check if there's an active agent for the target instance
-	s.mu.RLock()
-	agnt := s.currentAgents[targetID]
-	s.mu.RUnlock()
-	if agnt == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "no active scan"})
-		return
-	}
-
-	// Send the message to the agent
-	response, err := agnt.SendMessage(req.Message)
+	response, err := s.routeChatMessage(strings.TrimSpace(req.InstanceID), req.Message)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
@@ -3733,6 +3994,193 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{
 		"response": response,
 	})
+}
+
+func (s *Server) routeChatMessage(instanceID, message string) (string, error) {
+	if instanceID != "" {
+		s.instancesMu.RLock()
+		inst := s.instances[instanceID]
+		s.instancesMu.RUnlock()
+		if inst == nil {
+			return "", fmt.Errorf("instance not found")
+		}
+
+		inst.mu.RLock()
+		status := inst.Status
+		agnt := inst.agent
+		inst.mu.RUnlock()
+
+		if agnt != nil && status == "running" {
+			return agnt.SendMessage(message)
+		}
+		if status == "saved" || status == "pending" {
+			return "", fmt.Errorf("scan is not active yet")
+		}
+		return s.postScanChat(inst, message)
+	}
+
+	// Fallback for the older single-scan UI path, where chat messages did not
+	// include an instance_id and the currently running session was global.
+	s.mu.RLock()
+	targetID := s.currentScanID
+	agnt := s.currentAgents[targetID]
+	s.mu.RUnlock()
+	if agnt == nil {
+		return "", fmt.Errorf("no active scan")
+	}
+	return agnt.SendMessage(message)
+}
+
+func (s *Server) postScanChat(inst *ScanInstance, message string) (string, error) {
+	inst.mu.Lock()
+	if inst.chatCfg == nil {
+		chatCfg := *s.cfg
+		inst.chatCfg = &chatCfg
+	}
+	chatCfg := *inst.chatCfg
+	if len(inst.chatMessages) == 0 {
+		inst.chatMessages = []llm.Message{{
+			Role:    "system",
+			Content: buildPostScanChatPrompt(inst),
+		}}
+	}
+	messages := append([]llm.Message(nil), inst.chatMessages...)
+	messages = append(messages, llm.Message{Role: "user", Content: message})
+	inst.mu.Unlock()
+
+	response, err := s.postScanChatFn(&chatCfg, messages)
+	if err != nil {
+		return "", err
+	}
+	response = strings.TrimSpace(llm.CleanContent(response))
+	if response == "" {
+		response = "I do not have enough scan context to answer that."
+	}
+
+	inst.mu.Lock()
+	inst.chatMessages = append(messages, llm.Message{Role: "assistant", Content: response})
+	inst.chatMessages = trimPostScanChatHistory(inst.chatMessages)
+	inst.mu.Unlock()
+
+	return response, nil
+}
+
+func buildPostScanChatPrompt(inst *ScanInstance) string {
+	var b strings.Builder
+	if inst.Status == "paused" {
+		b.WriteString("You are Xalgorix in paused-scan chat mode. The scan is paused, so answer follow-up questions using only the scan context captured so far. Do not claim that you are still scanning or that you can run tools in this chat. If the user asks for new testing, explain what the current results show and suggest resuming the scan.\n\n")
+	} else {
+		b.WriteString("You are Xalgorix in post-scan chat mode. The scan has already finished, so answer follow-up questions using only the completed scan context below. Do not claim that you are still scanning or that you can run tools in this chat. If the user asks for new testing, explain what the existing results show and suggest restarting or starting a new scan.\n\n")
+	}
+
+	b.WriteString("## Scan\n")
+	fmt.Fprintf(&b, "Instance ID: %s\n", inst.ID)
+	fmt.Fprintf(&b, "Targets: %s\n", inst.Targets)
+	fmt.Fprintf(&b, "Status: %s\n", inst.Status)
+	if inst.ScanMode != "" {
+		fmt.Fprintf(&b, "Mode: %s\n", inst.ScanMode)
+	}
+	if inst.StartedAt != "" {
+		fmt.Fprintf(&b, "Started: %s\n", inst.StartedAt)
+	}
+	if inst.FinishedAt != "" {
+		fmt.Fprintf(&b, "Finished: %s\n", inst.FinishedAt)
+	}
+	fmt.Fprintf(&b, "Iterations: %d\nTool calls: %d\nVulnerabilities: %d\nTotal tokens: %d\n", inst.Iterations, inst.ToolCalls, inst.VulnCount, inst.TotalTokens)
+	if strings.TrimSpace(inst.Instruction) != "" {
+		fmt.Fprintf(&b, "User instructions: %s\n", truncStr(inst.Instruction, 1200))
+	}
+
+	if len(inst.Vulns) > 0 {
+		b.WriteString("\n## Vulnerabilities\n")
+		for i, v := range inst.Vulns {
+			if i >= 40 {
+				fmt.Fprintf(&b, "- ... %d additional vulnerabilities omitted from prompt context\n", len(inst.Vulns)-i)
+				break
+			}
+			fmt.Fprintf(&b, "- [%s] %s", strings.ToUpper(v.Severity), v.Title)
+			if v.Endpoint != "" {
+				fmt.Fprintf(&b, " at %s", v.Endpoint)
+			}
+			if v.CVSS > 0 {
+				fmt.Fprintf(&b, " (CVSS %.1f)", v.CVSS)
+			}
+			if v.Description != "" {
+				fmt.Fprintf(&b, " - %s", truncStr(v.Description, 500))
+			}
+			b.WriteByte('\n')
+		}
+	}
+
+	if len(inst.events) > 0 {
+		b.WriteString("\n## Recent Scan Events\n")
+		start := 0
+		if len(inst.events) > 80 {
+			start = len(inst.events) - 80
+		}
+		for _, evt := range inst.events[start:] {
+			line := summarizeChatEvent(evt)
+			if line != "" {
+				b.WriteString("- ")
+				b.WriteString(line)
+				b.WriteByte('\n')
+			}
+		}
+	}
+
+	return b.String()
+}
+
+func summarizeChatEvent(evt WSEvent) string {
+	switch evt.Type {
+	case "thinking":
+		return fmt.Sprintf("thinking: %s", truncStr(evt.Content, 160))
+	case "message":
+		return fmt.Sprintf("message: %s", truncStr(evt.Content, 300))
+	case "error":
+		return fmt.Sprintf("error: %s", truncStr(evt.Content, 300))
+	case "tool_call":
+		return fmt.Sprintf("tool_call: %s", evt.ToolName)
+	case "tool_result":
+		body := evt.Output
+		if body == "" {
+			body = evt.Error
+		}
+		if evt.ToolName != "" {
+			return fmt.Sprintf("tool_result: %s: %s", evt.ToolName, truncStr(body, 300))
+		}
+		return fmt.Sprintf("tool_result: %s", truncStr(body, 300))
+	case "finished":
+		return fmt.Sprintf("finished: %s", truncStr(evt.Content, 300))
+	case "target_started", "target_completed", "queue_started", "queue_finished", "report_ready":
+		if evt.Target != "" {
+			return fmt.Sprintf("%s: %s (%s)", evt.Type, truncStr(evt.Content, 220), evt.Target)
+		}
+		return fmt.Sprintf("%s: %s", evt.Type, truncStr(evt.Content, 220))
+	default:
+		return ""
+	}
+}
+
+func trimPostScanChatHistory(messages []llm.Message) []llm.Message {
+	const keepRecent = 40
+	if len(messages) <= keepRecent+1 {
+		return messages
+	}
+	trimmed := make([]llm.Message, 0, keepRecent+1)
+	trimmed = append(trimmed, messages[0])
+	trimmed = append(trimmed, messages[len(messages)-keepRecent:]...)
+	return trimmed
+}
+
+func truncStr(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return s[:max-3] + "..."
 }
 
 // handleQueueStatus returns the current queue state for recovery
@@ -3834,6 +4282,18 @@ func (s *Server) handleGetScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.Method == http.MethodGet {
+		s.instancesMu.RLock()
+		inst := s.instances[scanID]
+		s.instancesMu.RUnlock()
+		if rec := scanRecordFromInstance(inst); rec != nil {
+			data, _ := json.Marshal(rec)
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(data)
+			return
+		}
+	}
+
 	dir, rec := s.findScanByID(scanID)
 	_ = dir
 	if rec == nil {
@@ -3908,6 +4368,9 @@ func (s *Server) broadcastToInstance(instanceID string, evt WSEvent) {
 		// Also buffer vulns
 		if len(evt.Vulns) > 0 {
 			inst.Vulns = append(inst.Vulns, evt.Vulns...)
+		}
+		if evt.CurrentPhase > 0 {
+			inst.CurrentPhase = evt.CurrentPhase
 		}
 		inst.mu.Unlock()
 	}

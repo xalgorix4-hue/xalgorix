@@ -796,9 +796,15 @@ a:hover { color: #00ffaa; text-shadow: 0 0 8px rgba(0, 255, 136, 0.5); }
 
 .phase-checkbox:has(input:checked) {
   color: var(--accent);
-  border-color: rgba(0, 255, 136, 0.4);
-  background: rgba(0, 255, 136, 0.08);
-  box-shadow: 0 0 6px rgba(0, 255, 136, 0.15);
+  border-color: var(--accent);
+  background: rgba(0, 255, 136, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(0, 255, 136, 0.35), 0 0 8px rgba(0, 255, 136, 0.2);
+}
+
+.phase-checkbox input:checked + span::before {
+  content: '✓ ';
+  color: var(--accent);
+  font-weight: 900;
 }
 
 .phase-checkbox:hover {
@@ -1780,6 +1786,140 @@ a:hover { color: #00ffaa; text-shadow: 0 0 8px rgba(0, 255, 136, 0.5); }
   letter-spacing: 0.08em;
 }
 
+.scan-details-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  padding: var(--space-4);
+  clip-path: polygon(0 8px, 8px 0, calc(100% - 8px) 0, 100% 8px, 100% calc(100% - 8px), calc(100% - 8px) 100%, 8px 100%, 0 calc(100% - 8px));
+}
+
+.scan-details-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-3);
+}
+
+.scan-details-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0;
+  margin-bottom: 2px;
+}
+
+.scan-details-title {
+  font-family: var(--font-heading);
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--accent);
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+
+.scan-details-meta {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.scan-details-meta span {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent-tertiary);
+  border: 1px solid rgba(0, 212, 255, 0.35);
+  padding: 3px 8px;
+  background: rgba(0, 212, 255, 0.08);
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.scan-details-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.scan-details-value {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.active-phase-label {
+  color: var(--accent);
+}
+
+.phase-timeline {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  gap: 6px;
+  margin-top: var(--space-3);
+}
+
+.phase-step {
+  position: relative;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.16);
+  padding: 7px 8px 6px 28px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 1.25;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.phase-step::before {
+  content: attr(data-phase);
+  position: absolute;
+  left: 7px;
+  top: 8px;
+  width: 15px;
+  height: 15px;
+  display: grid;
+  place-items: center;
+  border: 1px solid currentColor;
+  font-size: 8px;
+}
+
+.phase-step.selected {
+  color: var(--text-primary);
+  border-color: rgba(0, 255, 136, 0.42);
+  background: rgba(0, 255, 136, 0.07);
+}
+
+.phase-step.done {
+  color: var(--accent);
+}
+
+.phase-step.active {
+  color: #05080a;
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: var(--glow-green);
+}
+
+.phase-step.skipped {
+  opacity: 0.42;
+}
+
+.phase-step-status {
+  display: block;
+  color: inherit;
+  font-size: 8px;
+  opacity: 0.75;
+  margin-top: 3px;
+}
+
 .btn-back { font-size: 11px; padding: 8px var(--space-4); }
 
 /* ── Footer ────────────────────────────────────────────────────────── */
@@ -1878,6 +2018,9 @@ a:hover { color: #00ffaa; text-shadow: 0 0 8px rgba(0, 255, 136, 0.5); }
   .btn-group { flex-direction: column; }
   .btn { width: 100%; }
   .severity-row { flex-wrap: wrap; }
+  .scan-details-main { flex-direction: column; }
+  .scan-details-grid { grid-template-columns: 1fr; }
+  .phase-timeline { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
 }
 
 @media (max-width: 480px) {

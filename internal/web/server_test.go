@@ -13,7 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xalgord/xalgorix/v4/internal/agent"
 	"github.com/xalgord/xalgorix/v4/internal/config"
+	"github.com/xalgord/xalgorix/v4/internal/llm"
+	"github.com/xalgord/xalgorix/v4/internal/scanctx"
 )
 
 func newTestServer(t *testing.T, cfg *config.Config) *Server {
@@ -146,6 +149,149 @@ func TestScanRequest_InternalFieldsIgnoredFromJSON(t *testing.T) {
 	}
 	if req.InstanceID != "" || req.IsResume {
 		t.Fatalf("internal fields were set from JSON: %#v", req)
+	}
+}
+
+func TestPhaseRestriction_ReconReportOnlyIsStrict(t *testing.T) {
+	instruction := buildPhaseFilterInstruction([]int{1, 22})
+	for _, want := range []string{
+		"RECONNAISSANCE-ONLY SCOPE",
+		"Do NOT run vulnerability scanners",
+		"DNS records",
+		"Open ports",
+		"do not call report_vulnerability",
+	} {
+		if !strings.Contains(instruction, want) {
+			t.Fatalf("phase restriction missing %q:\n%s", want, instruction)
+		}
+	}
+	if !isReconReportOnlyPhaseSelection([]int{1, 22}) {
+		t.Fatal("recon/report-only phase selection was not detected")
+	}
+	if isReconReportOnlyPhaseSelection([]int{1, 6, 22}) {
+		t.Fatal("vulnerability phase selection was incorrectly treated as recon-only")
+	}
+}
+
+func TestHandleGetScan_ReturnsLiveInstanceMetadata(t *testing.T) {
+	s := newTestServer(t, nil)
+	inst := &ScanInstance{
+		ID:             "inst-meta",
+		Name:           "Recon pass",
+		Targets:        "https://meta.test",
+		Status:         "running",
+		StartedAt:      "2026-05-10T10:00:00Z",
+		ScanMode:       "single",
+		Instruction:    "recon only",
+		SeverityFilter: []string{"high"},
+		Phases:         []int{1, 22},
+		CurrentPhase:   1,
+		CompanyName:    "ACME",
+		events: []WSEvent{{
+			Type:         "target_started",
+			Content:      "Scanning target",
+			CurrentPhase: 1,
+		}},
+	}
+	s.instancesMu.Lock()
+	s.instances[inst.ID] = inst
+	s.instancesMu.Unlock()
+
+	rr := httptest.NewRecorder()
+	s.handleGetScan(rr, httptest.NewRequest(http.MethodGet, "/api/scans/inst-meta", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("get scan code = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var rec ScanRecord
+	if err := json.Unmarshal(rr.Body.Bytes(), &rec); err != nil {
+		t.Fatalf("decode scan record: %v", err)
+	}
+	if rec.Name != "Recon pass" || rec.Instruction != "recon only" || rec.CurrentPhase != 1 || len(rec.Phases) != 2 {
+		t.Fatalf("live instance metadata not preserved: %#v", rec)
+	}
+}
+
+func TestHandleChat_RoutesRunningInstanceByInstanceID(t *testing.T) {
+	s := newTestServer(t, nil)
+	events := make(chan agent.Event, 4)
+	sctx := scanctx.New("chat-running", t.TempDir())
+	agnt := agent.NewAgent(s.cfg, "test-agent", events, sctx)
+	inst := &ScanInstance{
+		ID:      "inst-running",
+		Targets: "https://running.test",
+		Status:  "running",
+		agent:   agnt,
+	}
+	s.instancesMu.Lock()
+	s.instances[inst.ID] = inst
+	s.instancesMu.Unlock()
+	t.Cleanup(func() {
+		agnt.Stop()
+		sctx.Close()
+	})
+
+	rr := httptest.NewRecorder()
+	body := strings.NewReader(`{"instance_id":"inst-running","message":"continue checking auth"}`)
+	s.handleChat(rr, httptest.NewRequest(http.MethodPost, "/api/chat", body))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("chat status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "next iteration") {
+		t.Fatalf("unexpected running chat response: %s", rr.Body.String())
+	}
+}
+
+func TestHandleChat_AllowsFinishedInstancePostScanChat(t *testing.T) {
+	s := newTestServer(t, &config.Config{RateLimitRequests: 60, RateLimitWindow: 60})
+	var gotMessages []string
+	s.postScanChatFn = func(_ *config.Config, messages []llm.Message) (string, error) {
+		for _, msg := range messages {
+			gotMessages = append(gotMessages, msg.Content)
+		}
+		return "The scan found one high severity issue.", nil
+	}
+	inst := &ScanInstance{
+		ID:          "inst-finished",
+		Targets:     "https://done.test",
+		Status:      "finished",
+		StartedAt:   "2026-05-10T10:00:00Z",
+		FinishedAt:  "2026-05-10T10:30:00Z",
+		ScanMode:    "single",
+		Iterations:  2,
+		ToolCalls:   3,
+		VulnCount:   1,
+		TotalTokens: 100,
+		Vulns: []VulnSummary{{
+			ID:          "v1",
+			Title:       "SQL injection",
+			Severity:    "high",
+			Endpoint:    "/login",
+			Description: "Authentication endpoint reflected SQL errors.",
+		}},
+		events: []WSEvent{
+			{Type: "target_started", Target: "https://done.test", Content: "Scanning https://done.test"},
+			{Type: "finished", Content: "Completed with one finding"},
+		},
+	}
+	s.instancesMu.Lock()
+	s.instances[inst.ID] = inst
+	s.instancesMu.Unlock()
+
+	rr := httptest.NewRecorder()
+	body := strings.NewReader(`{"instance_id":"inst-finished","message":"what did we find?"}`)
+	s.handleChat(rr, httptest.NewRequest(http.MethodPost, "/api/chat", body))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("chat status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "one high severity issue") {
+		t.Fatalf("unexpected post-scan chat response: %s", rr.Body.String())
+	}
+	joinedMessages := strings.Join(gotMessages, "\n")
+	if !strings.Contains(joinedMessages, "post-scan chat mode") ||
+		!strings.Contains(joinedMessages, "SQL injection") ||
+		!strings.Contains(joinedMessages, "what did we find?") {
+		t.Fatalf("LLM prompt missing completed scan context or user message: %s", joinedMessages)
 	}
 }
 

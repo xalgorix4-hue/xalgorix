@@ -150,6 +150,35 @@
         },
     };
 
+    const METHODOLOGY_PHASES = [
+        { id: 1, short: 'Recon', name: 'Recon & Attack Surface' },
+        { id: 2, short: 'Vuln Discovery', name: 'Manual Vulnerability Discovery' },
+        { id: 3, short: 'Dirs', name: 'Directory & File Discovery' },
+        { id: 4, short: 'CORS', name: 'CORS & Cookie Analysis' },
+        { id: 5, short: 'Auth', name: 'Authentication & Session Testing' },
+        { id: 6, short: 'Injection', name: 'Injection Testing' },
+        { id: 7, short: 'SSRF', name: 'SSRF Testing' },
+        { id: 8, short: 'IDOR', name: 'IDOR & Broken Access' },
+        { id: 9, short: 'API', name: 'API & GraphQL Testing' },
+        { id: 10, short: 'Upload', name: 'File Upload Testing' },
+        { id: 11, short: 'RCE', name: 'Deserialization & RCE' },
+        { id: 12, short: 'Logic', name: 'Race Conditions & Logic' },
+        { id: 13, short: 'Takeover', name: 'Subdomain Takeover' },
+        { id: 14, short: 'Redirect', name: 'Open Redirect Testing' },
+        { id: 15, short: 'Email', name: 'Email Security Testing' },
+        { id: 16, short: 'Cloud', name: 'Cloud & Infrastructure' },
+        { id: 17, short: 'WebSocket', name: 'WebSocket Testing' },
+        { id: 18, short: 'CMS', name: 'CMS-Specific Testing' },
+        { id: 19, short: 'Spoofing', name: 'Link Hijack & Spoofing' },
+        { id: 20, short: 'Verify', name: 'Exploit Verification' },
+        { id: 21, short: 'Zero-Day', name: 'Zero-Day Discovery' },
+        { id: 22, short: 'Report', name: 'Final Report' },
+    ];
+
+    let currentScanPhases = [];
+    let currentPhase = 0;
+    let currentScanStatus = 'idle';
+
     // Helper: Replace a <select> with a text <input> (returns the new input element)
     function switchToTextInput(selectEl, placeholder) {
         const input = document.createElement('input');
@@ -367,8 +396,14 @@
 
         hideEmptyState();
 
+        if (evt.current_phase) {
+            setCurrentPhase(evt.current_phase);
+        }
+
         switch (evt.type) {
             case 'queue_started':
+                currentScanStatus = 'running';
+                renderPhaseTimeline(currentScanPhases, currentPhase, currentScanStatus);
                 setStatus('running', 'SCANNING');
                 totalTargets = evt.total_targets || 1;
                 if (totalTargets > 1) showQueueBar();
@@ -394,7 +429,7 @@
                 }
                 if (totalTargets > 1 || totalSubTargets > 0) showQueueBar();
                 addFeedItem(renderTargetBanner(evt.target));
-                if (evt.agent_id) {
+                if (evt.agent_id && !currentInstanceID) {
                     history.pushState(null, '', '/' + evt.agent_id);
                 }
                 break;
@@ -405,10 +440,12 @@
 
             case 'queue_finished':
                 scanRunning = false;
+                currentScanStatus = 'finished';
+                renderPhaseTimeline(currentScanPhases, currentPhase, currentScanStatus);
                 setStatus('finished', 'COMPLETED');
                 toggleButtons(false);
                 hideQueueBar();
-                hideChatInput();
+                showChatInput('Ask follow-up questions about this completed scan');
                 addFeedItem(renderBanner('🏁', evt.content || 'All targets completed', 'success'));
                 showToast('🏁 All targets completed', 'success');
                 break;
@@ -419,6 +456,8 @@
                 break;
 
             case 'scan_started':
+                currentScanStatus = 'running';
+                renderPhaseTimeline(currentScanPhases, currentPhase, currentScanStatus);
                 setStatus('running', 'SCANNING');
                 addFeedItem(renderBanner('🚀', evt.content));
                 break;
@@ -503,9 +542,11 @@
                 // handles the final state transition.
                 if (totalTargets <= 1 && totalSubTargets <= 0) {
                     scanRunning = false;
+                    currentScanStatus = 'finished';
+                    renderPhaseTimeline(currentScanPhases, currentPhase, currentScanStatus);
                     setStatus('finished', 'COMPLETED');
                     toggleButtons(false);
-                    hideChatInput();
+                    showChatInput('Ask follow-up questions about this completed scan');
                     addFeedItem(renderFinished(evt.content));
                     showToast('✅ Scan completed', 'success');
                 }
@@ -513,10 +554,12 @@
 
             case 'stopped':
                 scanRunning = false;
+                currentScanStatus = 'stopped';
+                renderPhaseTimeline(currentScanPhases, currentPhase, currentScanStatus);
                 setStatus('idle', 'STOPPED');
                 toggleButtons(false);
                 hideQueueBar();
-                hideChatInput();
+                showChatInput('Ask follow-up questions about this stopped scan');
                 addFeedItem(renderError(evt.content || 'Scan stopped by user'));
                 showToast('■ Scan stopped', 'warning');
                 break;
@@ -811,6 +854,18 @@
         startBtn.disabled = false;
     }
 
+    function configureStartButtonForInstance(inst) {
+        const startBtn = document.getElementById('start-btn');
+        if (!startBtn) return;
+        if (inst && inst.status === 'saved' && currentInstanceID) {
+            startBtn.innerHTML = '<span>▶</span> Start Saved Scan';
+            startBtn.onclick = () => startSavedInstance(currentInstanceID);
+        } else {
+            startBtn.innerHTML = '<span>▶</span> Start Scan';
+            startBtn.onclick = () => startScan();
+        }
+    }
+
     function showReportButton(url) {
         // Remove existing
         const existing = document.querySelector('.report-btn');
@@ -836,15 +891,113 @@
         return d.innerHTML;
     }
 
+    function normalizePhaseList(phases) {
+        if (!Array.isArray(phases)) return [];
+        return [...new Set(phases.map(Number).filter(p => p >= 1 && p <= 22))].sort((a, b) => a - b);
+    }
+
+    function firstSelectedPhase(phases) {
+        const selected = normalizePhaseList(phases);
+        return selected.length ? selected[0] : 1;
+    }
+
+    function phaseByID(id) {
+        return METHODOLOGY_PHASES.find(p => p.id === Number(id)) || null;
+    }
+
+    function phaseLabel(id) {
+        const phase = phaseByID(id);
+        return phase ? `${phase.id}. ${phase.name}` : '—';
+    }
+
+    function selectedPhaseText(phases) {
+        const selected = normalizePhaseList(phases);
+        if (!selected.length) return 'All phases';
+        return selected.map(id => {
+            const phase = phaseByID(id);
+            return phase ? `${id} ${phase.short}` : String(id);
+        }).join(', ');
+    }
+
+    function renderScanDetails(scan) {
+        currentScanPhases = normalizePhaseList(scan.phases || []);
+        currentPhase = Number(scan.current_phase || currentPhase || firstSelectedPhase(currentScanPhases));
+        currentScanStatus = scan.status || 'idle';
+
+        const nameEl = document.getElementById('scan-detail-name');
+        const targetEl = document.getElementById('scan-detail-target');
+        const modeEl = document.getElementById('scan-detail-mode');
+        const statusEl = document.getElementById('scan-detail-status');
+        const phasesEl = document.getElementById('scan-detail-phases');
+        const activeEl = document.getElementById('scan-detail-active-phase');
+
+        if (nameEl) nameEl.textContent = scan.name || 'Untitled scan';
+        if (targetEl) targetEl.textContent = scan.targets || scan.target || '—';
+        if (modeEl) modeEl.textContent = (scan.scan_mode || 'single').toUpperCase();
+        if (statusEl) statusEl.textContent = (scan.status || 'idle').toUpperCase();
+        if (phasesEl) phasesEl.textContent = selectedPhaseText(currentScanPhases);
+        if (activeEl) activeEl.textContent = phaseLabel(currentPhase);
+
+        renderPhaseTimeline(currentScanPhases, currentPhase, currentScanStatus);
+    }
+
+    function setCurrentPhase(phase) {
+        const parsed = Number(phase);
+        if (!parsed || parsed < 1 || parsed > 22) return;
+        currentPhase = parsed;
+        const activeEl = document.getElementById('scan-detail-active-phase');
+        if (activeEl) activeEl.textContent = phaseLabel(currentPhase);
+        renderPhaseTimeline(currentScanPhases, currentPhase, currentScanStatus);
+    }
+
+    function renderPhaseTimeline(phases, activePhase, status) {
+        const timeline = document.getElementById('phase-timeline');
+        if (!timeline) return;
+
+        const selected = normalizePhaseList(phases);
+        const selectedSet = new Set(selected.length ? selected : METHODOLOGY_PHASES.map(p => p.id));
+        const visible = selected.length ? METHODOLOGY_PHASES.filter(p => selectedSet.has(p.id)) : METHODOLOGY_PHASES;
+        const activeIndex = visible.findIndex(p => p.id === Number(activePhase));
+        const isFinished = status === 'finished';
+
+        timeline.innerHTML = visible.map((phase, index) => {
+            const selectedClass = selectedSet.has(phase.id) ? 'selected' : 'skipped';
+            const activeClass = phase.id === Number(activePhase) && status === 'running' ? 'active' : '';
+            const doneClass = isFinished || (activeIndex >= 0 && index < activeIndex) ? 'done' : '';
+            const state = activeClass ? 'Active' : doneClass ? 'Done' : selectedClass === 'skipped' ? 'Skipped' : 'Queued';
+            return `
+                <div class="phase-step ${selectedClass} ${activeClass} ${doneClass}" data-phase="${phase.id}" title="${escapeHtml(phase.name)}">
+                    ${escapeHtml(phase.short)}
+                    <span class="phase-step-status">${state}</span>
+                </div>`;
+        }).join('');
+    }
+
     // ── Timer ──────────────────────────────────────────────
     function startTimer(startFrom) {
         scanStart = startFrom ? new Date(startFrom).getTime() : Date.now();
-        // Show chat input when scan starts
-        document.getElementById('chat-input-container').style.display = 'block';
+        showChatInput('Chat is active during scans');
+    }
+
+    function showChatInput(hintText) {
+        const container = document.getElementById('chat-input-container');
+        if (container) container.style.display = 'block';
+        const hint = document.getElementById('chat-hint');
+        if (hint && hintText) hint.textContent = hintText;
+        const input = document.getElementById('chat-input');
+        if (input) input.placeholder = scanRunning
+            ? 'Send a message to Xalgorix during scan...'
+            : 'Ask Xalgorix about this scan...';
     }
 
     function hideChatInput() {
         document.getElementById('chat-input-container').style.display = 'none';
+    }
+
+    function currentChatInstanceID() {
+        if (currentInstanceID) return currentInstanceID;
+        const pathID = window.location.pathname.replace(/^\/+/, '').trim();
+        return pathID || '';
     }
 
     // ── Chat Functions ─────────────────────────────────────
@@ -872,12 +1025,19 @@
 
         // Send to server
         try {
+            const payload = { message };
+            const instanceID = currentChatInstanceID();
+            if (instanceID) payload.instance_id = instanceID;
+
             const resp = await fetch('/api/chat', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({message})
+                body: JSON.stringify(payload)
             });
             const data = await resp.json();
+            if (!resp.ok) {
+                throw new Error(data.error || 'Chat failed');
+            }
 
             // Add Xalgorix response to feed
             const botMsg = document.createElement('div');
@@ -1016,6 +1176,11 @@
 
 
         scanRunning = true;
+        currentScanPhases = [];
+        currentPhase = 1;
+        currentScanStatus = 'running';
+        renderScanDetails({ target: targetVal, scan_mode: scanMode, status: 'running', current_phase: 1 });
+        configureStartButtonForInstance(null);
         toggleButtons(true);
         setStatus('running', 'SCANNING');
         startTimer();
@@ -1109,12 +1274,18 @@
             const statusResp = await fetch('/api/status');
             const status = await statusResp.json();
             
+            if (status.running && status.instance_id) {
+                navigateToInstance(status.instance_id);
+                showChatInput('Chat is active during scans');
+                return;
+            }
+
             if (status.running && status.scan_id) {
                 // There's a running scan, load it
                 history.replaceState(null, '', '/' + status.scan_id);
                 await loadScanById(status.scan_id);
                 // Show chat input when scan is running
-                document.getElementById('chat-input-container').style.display = 'block';
+                showChatInput('Chat is active during scans');
                 return;
             }
         } catch (e) {
@@ -1153,6 +1324,9 @@
             iterCount = scan.iterations || 0;
             toolCount = scan.tool_calls || 0;
             vulnCount = (scan.vulns || []).length;
+            currentPhase = Number(scan.current_phase || firstSelectedPhase(scan.phases || []));
+            currentScanStatus = scan.status || 'idle';
+            renderScanDetails(scan);
             
             const iterEl = document.getElementById('stat-iter');
             const toolsEl = document.getElementById('stat-tools');
@@ -1219,11 +1393,29 @@
                 if (serverStatus.running) {
                     setStatus('running', 'SCANNING');
                     scanRunning = true;
+                    currentScanStatus = 'running';
+                    configureStartButtonForInstance(null);
                     toggleButtons(true);
                     startTimer(scan.started_at ? new Date(scan.started_at) : null);
+                } else if (scan.status === 'saved') {
+                    scanRunning = false;
+                    setStatus('idle', 'SAVED');
+                    toggleButtons(false);
+                    configureStartButtonForInstance(scan);
+                    hideChatInput();
                 } else if (scan.status === 'finished') {
+                    scanRunning = false;
                     setStatus('finished', 'COMPLETED');
+                    toggleButtons(false);
+                    configureStartButtonForInstance(null);
+                    showChatInput('Ask follow-up questions about this completed scan');
                     showReportButton(`/api/report/${encodeURIComponent(scan.id)}`);
+                } else if (scan.status === 'stopped') {
+                    scanRunning = false;
+                    setStatus('idle', 'STOPPED');
+                    toggleButtons(false);
+                    configureStartButtonForInstance(null);
+                    showChatInput('Ask follow-up questions about this stopped scan');
                 }
             } catch (e) {}
 
@@ -1231,9 +1423,8 @@
                 document.getElementById('target-input').value = scan.target;
             }
 
-            // Switch to scan view and render the instance grid so dashboard shows the loaded scan
+            // Switch to scan view for the loaded scan.
             currentView = 'scan';
-            renderInstanceGrid();
 
             feed.scrollTop = feed.scrollHeight;
         } catch (e) {
@@ -1496,7 +1687,7 @@
                 setStatus('finished', 'COMPLETED');
                 toggleButtons(false);
                 hideQueueBar();
-                hideChatInput();
+                showChatInput('Ask follow-up questions about this completed scan');
                 // Add a completion banner if one doesn't already exist
                 const feed = document.getElementById('feed-body');
                 const hasFinished = feed.querySelector('.event-finished');
@@ -1609,6 +1800,7 @@
         document.getElementById('feed-body').innerHTML = '';
         document.getElementById('vuln-list').innerHTML = '<li class="empty-state" style="padding:20px 0"><div class="empty-title">Loading...</div></li>';
         document.getElementById('tools-list').innerHTML = '<li class="empty-state" style="padding:20px 0"><div class="empty-title">Loading...</div></li>';
+        renderScanDetails({ id: instanceId, status: 'loading', targets: 'Loading...' });
         
         // Load instance state
         loadInstanceState(instanceId);
@@ -1619,22 +1811,46 @@
             const resp = await fetch('/api/instances/' + instanceId);
             if (!resp.ok) return;
             const inst = await resp.json();
-            
+            currentPhase = Number(inst.current_phase || firstSelectedPhase(inst.phases || []));
+            currentScanStatus = inst.status || 'idle';
+            renderScanDetails(inst);
+            configureStartButtonForInstance(inst);
+
             // Populate target input
             if (inst.targets) {
                 const targetInput = document.getElementById('target-input');
                 if (targetInput) targetInput.value = inst.targets;
             }
-            
-            if (inst.status === 'running') {
+            const modeInput = document.getElementById('scan-mode');
+            if (modeInput && inst.scan_mode) modeInput.value = inst.scan_mode;
+            const instructionInput = document.getElementById('instruction-input');
+            if (instructionInput) instructionInput.value = inst.instruction || '';
+
+            if (inst.status === 'running' || inst.status === 'pending') {
                 scanRunning = true;
                 toggleButtons(true);
-                setStatus('running', 'SCANNING');
+                setStatus('running', inst.status === 'pending' ? 'PENDING' : 'SCANNING');
                 startTimer();
+            } else if (inst.status === 'saved') {
+                scanRunning = false;
+                toggleButtons(false);
+                setStatus('idle', 'SAVED');
+                hideChatInput();
+            } else if (inst.status === 'paused') {
+                scanRunning = false;
+                toggleButtons(false);
+                setStatus('idle', 'PAUSED');
+                showChatInput('Ask follow-up questions about this paused scan');
             } else {
                 scanRunning = false;
                 toggleButtons(false);
-                setStatus(inst.status === 'stopped' ? 'finished' : 'finished', inst.status.toUpperCase());
+                setStatus(inst.status === 'stopped' ? 'idle' : 'finished', inst.status.toUpperCase());
+                showChatInput(inst.status === 'stopped'
+                    ? 'Ask follow-up questions about this stopped scan'
+                    : 'Ask follow-up questions about this completed scan');
+                if (inst.status === 'finished' || inst.status === 'stopped') {
+                    showReportButton(`/api/report/${encodeURIComponent(inst.id)}`);
+                }
             }
             
             // Update stats — use Math.max to avoid resetting counters
@@ -2127,8 +2343,12 @@
     // Start a saved (queued) instance
     window.startSavedInstance = async function(instanceId) {
         try {
-            await fetch('/api/instances/' + instanceId + '/start', { method: 'POST' });
+            const resp = await fetch('/api/instances/' + instanceId + '/start', { method: 'POST' });
+            const data = await resp.json().catch(() => ({}));
             showToast('▶ Starting saved scan...', 'success');
+            if (data.instance_id) {
+                navigateToInstance(data.instance_id);
+            }
             setTimeout(refreshInstances, 500);
         } catch (e) {
             showToast('Failed to start instance', 'error');
@@ -2159,8 +2379,8 @@
     
     // Pause/Resume from scan detail view
     window.pauseCurrentScan = async function() {
-        if (!currentInstanceId) return;
-        await window.pauseInstance(currentInstanceId);
+        if (!currentInstanceID) return;
+        await window.pauseInstance(currentInstanceID);
         const pauseBtn = document.getElementById('pause-btn');
         const resumeBtn = document.getElementById('resume-btn');
         if (pauseBtn) pauseBtn.classList.add('hidden');
@@ -2168,8 +2388,8 @@
     };
     
     window.resumeCurrentScan = async function() {
-        if (!currentInstanceId) return;
-        await window.resumeInstance(currentInstanceId);
+        if (!currentInstanceID) return;
+        await window.resumeInstance(currentInstanceID);
         const pauseBtn = document.getElementById('pause-btn');
         const resumeBtn = document.getElementById('resume-btn');
         if (resumeBtn) resumeBtn.classList.add('hidden');

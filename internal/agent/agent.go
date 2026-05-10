@@ -71,6 +71,7 @@ type Agent struct {
 	activityMu    sync.Mutex
 	scanStart     time.Time     // when Run() was called
 	discoveryMode bool          // When true, allow finish at any iteration (for Phase 1 enumeration)
+	allowedPhases []int         // selected methodology phases, empty means all
 	hooks         *HookRegistry // extensible lifecycle hooks
 	state         *ScanState    // shared mutable scan state for hooks
 }
@@ -171,6 +172,24 @@ func NewAgent(cfg *config.Config, name string, events chan Event, sc ...*scanctx
 // Used for Phase 1 subdomain enumeration where we want the agent to exit immediately.
 func (a *Agent) SetDiscoveryMode(enabled bool) {
 	a.discoveryMode = enabled
+}
+
+// SetPhaseRestrictions configures the selected methodology phases for policy hooks.
+// An empty slice means the full methodology is allowed.
+func (a *Agent) SetPhaseRestrictions(phases []int) {
+	a.allowedPhases = append([]int(nil), phases...)
+}
+
+func isReconReportOnlyPhaseSelection(phases []int) bool {
+	if len(phases) == 0 {
+		return false
+	}
+	for _, phase := range phases {
+		if phase != 1 && phase != 22 {
+			return false
+		}
+	}
+	return true
 }
 
 // stripThink removes <think>...</think> blocks from the response.
@@ -391,6 +410,38 @@ func (a *Agent) executeToolAsync(toolName string, toolArgs map[string]string) (t
 	}
 }
 
+func (a *Agent) shouldBlockForPhaseRestriction(toolName string, toolArgs map[string]string) (bool, string) {
+	if !isReconReportOnlyPhaseSelection(a.allowedPhases) {
+		return false, ""
+	}
+
+	lowerTool := strings.ToLower(toolName)
+	if lowerTool == "report_vulnerability" {
+		return true, "report_vulnerability is out of scope for a reconnaissance/report-only scan. Record recon findings in notes and finish with a recon-focused summary instead."
+	}
+
+	combined := lowerTool
+	for _, value := range toolArgs {
+		combined += " " + strings.ToLower(value)
+	}
+
+	blockedPatterns := []string{
+		"sqlmap", "dalfox", "nuclei", "nikto", "xsstrike", "commix",
+		"tplmap", "ssrfmap", "msfconsole", "metasploit", "searchsploit",
+		"exploit-db", "wpscan", "joomscan",
+		"union select", "<script", "alert(", "sleep(", "pg_sleep",
+		"waitfor delay", "../etc/passwd", "/etc/passwd", "169.254.169.254",
+		"__proto__", "%0d%0a", "jndi:", "burp collaborator",
+	}
+	for _, pattern := range blockedPatterns {
+		if strings.Contains(combined, pattern) {
+			return true, fmt.Sprintf("Blocked %q because this scan is limited to reconnaissance and reporting. Allowed recon includes DNS records, IP resolution, ports, services, HTTP metadata, technologies, URLs, and non-exploit evidence collection.", pattern)
+		}
+	}
+
+	return false, ""
+}
+
 // Run starts the agent loop with the given targets and instructions.
 func (a *Agent) Run(targets []string, instruction string) {
 	a.scanStart = time.Now()
@@ -410,6 +461,11 @@ func (a *Agent) Run(targets []string, instruction string) {
 	// Initialize scan state for hooks (replaces 17+ local tracking variables)
 	a.state = NewScanState()
 	a.state.DiscoveryMode = a.discoveryMode
+	a.state.AllowedPhases = append([]int(nil), a.allowedPhases...)
+	a.state.ReconOnlyMode = isReconReportOnlyPhaseSelection(a.allowedPhases)
+	if a.state.ReconOnlyMode {
+		a.state.DiscoveryMode = true
+	}
 
 	// Helper to get current token count
 	tokenCount := func() int {
@@ -570,6 +626,17 @@ func (a *Agent) Run(targets []string, instruction string) {
 			for k, v := range tc.Args {
 				toolArgs[k] = v
 			}
+
+			if blocked, reason := a.shouldBlockForPhaseRestriction(tc.Name, tc.Args); blocked {
+				blockMsg := "⛔ PHASE RESTRICTION BLOCKED TOOL — " + reason
+				a.emit(Event{Type: "tool_call", ToolName: tc.Name, ToolArgs: tc.Args})
+				a.emit(Event{Type: "tool_result", ToolName: tc.Name, ToolResult: tools.Result{Output: blockMsg}, TotalTokens: tokenCount()})
+				a.msgMu.Lock()
+				a.messages = append(a.messages, llm.Message{Role: "user", Content: blockMsg})
+				a.msgMu.Unlock()
+				continue
+			}
+
 			a.hooks.Fire(OnToolCall, a.state, toolArgs)
 
 			// ── Hook: OnStuckCheck (nudge/force-skip based on stuck counters) ──

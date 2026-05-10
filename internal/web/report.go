@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -79,17 +80,145 @@ func riskLabel(score float64) string {
 	}
 }
 
+type reconReportSummary struct {
+	DNSRecords   []string
+	IPAddresses  []string
+	Ports        []string
+	Technologies []string
+	URLs         []string
+}
+
+func (s reconReportSummary) hasData() bool {
+	return len(s.DNSRecords)+len(s.IPAddresses)+len(s.Ports)+len(s.Technologies)+len(s.URLs) > 0
+}
+
+var (
+	ipv4Re      = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+	dnsRecordRe = regexp.MustCompile(`(?im)\b([a-z0-9_.-]+)\s+(?:\d+\s+)?(?:in\s+)?(a|aaaa|cname|mx|ns|txt|soa)\s+([^\r\n]{1,160})`)
+	openPortRe  = regexp.MustCompile(`(?im)\b([0-9]{1,5})/(tcp|udp)\s+open\s+([^\s]+)?([^\r\n]{0,100})`)
+)
+
+func collectReconReportSummary(events []WSEvent) reconReportSummary {
+	var summary reconReportSummary
+	seenDNS := map[string]bool{}
+	seenIP := map[string]bool{}
+	seenPort := map[string]bool{}
+	seenTech := map[string]bool{}
+	seenURL := map[string]bool{}
+
+	techSignals := map[string][]string{
+		"Cloudflare": {"cloudflare", "cf-ray"},
+		"Nginx":      {"nginx"},
+		"Apache":     {"apache"},
+		"IIS":        {"microsoft-iis", "iis/"},
+		"WordPress":  {"wordpress", "wp-content"},
+		"Laravel":    {"laravel"},
+		"PHP":        {"x-powered-by: php", "phpsessid", ".php"},
+		"Node.js":    {"node.js", "express", "x-powered-by: express"},
+		"Next.js":    {"next.js", "_next/"},
+		"React":      {"react", "react-dom"},
+		"jQuery":     {"jquery"},
+		"Django":     {"django", "csrftoken"},
+		"Flask":      {"flask"},
+		"Spring":     {"spring", "jsessionid"},
+		"Tomcat":     {"tomcat"},
+		"GraphQL":    {"graphql"},
+	}
+
+	for _, evt := range events {
+		text := evt.Content + "\n" + evt.Output + "\n" + evt.Error
+		for _, value := range evt.ToolArgs {
+			text += "\n" + value
+		}
+		lower := strings.ToLower(text)
+
+		for _, ip := range ipv4Re.FindAllString(text, -1) {
+			if validIPv4(ip) {
+				addUnique(&summary.IPAddresses, seenIP, ip, 40)
+			}
+		}
+
+		for _, match := range dnsRecordRe.FindAllStringSubmatch(text, -1) {
+			if len(match) == 4 {
+				record := fmt.Sprintf("%s %s %s", strings.TrimSpace(match[1]), strings.ToUpper(match[2]), strings.TrimSpace(match[3]))
+				addUnique(&summary.DNSRecords, seenDNS, record, 40)
+			}
+		}
+
+		for _, match := range openPortRe.FindAllStringSubmatch(text, -1) {
+			if len(match) >= 4 {
+				port := strings.TrimSpace(match[1])
+				service := strings.TrimSpace(match[3] + match[4])
+				if service == "" {
+					service = "unknown"
+				}
+				addUnique(&summary.Ports, seenPort, fmt.Sprintf("%s/%s %s", port, strings.ToLower(match[2]), service), 40)
+			}
+		}
+
+		for tech, signals := range techSignals {
+			for _, signal := range signals {
+				if strings.Contains(lower, signal) {
+					addUnique(&summary.Technologies, seenTech, tech, 30)
+					break
+				}
+			}
+		}
+
+		for _, word := range strings.Fields(text) {
+			if strings.Contains(word, "http://") || strings.Contains(word, "https://") {
+				if u := extractURL(word); u != "" {
+					addUnique(&summary.URLs, seenURL, u, 50)
+				}
+			}
+		}
+	}
+
+	sort.Strings(summary.DNSRecords)
+	sort.Strings(summary.IPAddresses)
+	sort.Strings(summary.Ports)
+	sort.Strings(summary.Technologies)
+	sort.Strings(summary.URLs)
+	return summary
+}
+
+func addUnique(values *[]string, seen map[string]bool, value string, max int) {
+	value = strings.TrimSpace(value)
+	if value == "" || seen[value] || len(*values) >= max {
+		return
+	}
+	seen[value] = true
+	*values = append(*values, value)
+}
+
+func validIPv4(ip string) bool {
+	parts := strings.Split(ip, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		var n int
+		if _, err := fmt.Sscanf(part, "%d", &n); err != nil || n < 0 || n > 255 {
+			return false
+		}
+	}
+	return true
+}
+
 // methodologyPhaseNames maps phase number to name for report display.
 var methodologyPhaseNames = map[int]string{
-	1: "Deep Reconnaissance & Attack Surface Mapping",
-	2: "Manual Vulnerability Discovery",
-	3: "Directory & File Discovery",
-	4: "CORS & Cookie Analysis",
-	5: "Authentication & Session Testing",
-	6: "Injection Testing",
-	7: "SSRF Testing",
-	8: "IDOR & Broken Access Control",
-	9: "API & GraphQL Testing",
+	1:  "Deep Reconnaissance & Attack Surface Mapping",
+	2:  "Manual Vulnerability Discovery",
+	3:  "Directory & File Discovery",
+	4:  "CORS & Cookie Analysis",
+	5:  "Authentication & Session Testing",
+	6:  "Injection Testing",
+	7:  "SSRF Testing",
+	8:  "IDOR & Broken Access Control",
+	9:  "API & GraphQL Testing",
 	10: "File Upload Testing",
 	11: "Deserialization & RCE",
 	12: "Race Conditions & Business Logic",
@@ -111,17 +240,17 @@ func (s *Server) generateReport(scan *ScanRecord) (string, error) {
 	pdf.SetAutoPageBreak(true, 20)
 
 	// Colors - dark theme to match UI
-	darkBg := [3]int{15, 23, 42}      // #0f172a - main background
-	coral := [3]int{244, 63, 94}      // #F43F5E - primary accent (coral rose)
-	teal := [3]int{45, 212, 191}      // #2DD4BF - secondary accent
-	white := [3]int{240, 240, 242}    // #f0f0f2 - text
-	gray := [3]int{148, 163, 184}     // muted text
-	red := [3]int{220, 53, 69}        // critical
-	orange := [3]int{220, 120, 50}    // high
-	amber := [3]int{220, 170, 50}     // medium
-	greenLow := [3]int{40, 167, 69}   // low
-	cyan := [3]int{6, 182, 212}       // info
-	sectionBg := [3]int{30, 41, 59}   // #1e293b
+	darkBg := [3]int{15, 23, 42}    // #0f172a - main background
+	coral := [3]int{244, 63, 94}    // #F43F5E - primary accent (coral rose)
+	teal := [3]int{45, 212, 191}    // #2DD4BF - secondary accent
+	white := [3]int{240, 240, 242}  // #f0f0f2 - text
+	gray := [3]int{148, 163, 184}   // muted text
+	red := [3]int{220, 53, 69}      // critical
+	orange := [3]int{220, 120, 50}  // high
+	amber := [3]int{220, 170, 50}   // medium
+	greenLow := [3]int{40, 167, 69} // low
+	cyan := [3]int{6, 182, 212}     // info
+	sectionBg := [3]int{30, 41, 59} // #1e293b
 
 	// Helper: set text color
 	setColor := func(c [3]int) {
@@ -459,21 +588,36 @@ func (s *Server) generateReport(scan *ScanRecord) (string, error) {
 		if phaseNum%2 == 0 {
 			bgColor = sectionBg
 		}
+		if executed {
+			bgColor = [3]int{18, 65, 75}
+		}
 		drawRect(10, rowY, 190, 7, bgColor)
 		// Status indicator
 		if executed {
-			drawRect(12, rowY+1.5, 4, 4, teal)
+			drawRect(10, rowY, 3, 7, teal)
+			drawRect(14, rowY+1.5, 4, 4, teal)
 		} else {
-			drawRect(12, rowY+1.5, 4, 4, gray)
+			drawRect(14, rowY+1.5, 4, 4, gray)
 		}
-		pdf.SetXY(20, rowY)
+		pdf.SetXY(22, rowY)
 		pdf.SetFont("Helvetica", "", 8)
 		if executed {
 			setColor(white)
 		} else {
 			setColor(gray)
 		}
-		pdf.CellFormat(180, 7, fmt.Sprintf("Phase %d: %s", phaseNum, name), "", 1, "L", false, 0, "")
+		status := "SKIPPED"
+		if executed {
+			status = "SELECTED"
+		}
+		pdf.CellFormat(145, 7, fmt.Sprintf("Phase %d: %s", phaseNum, name), "", 0, "L", false, 0, "")
+		pdf.SetFont("Helvetica", "B", 7)
+		if executed {
+			setColor(teal)
+		} else {
+			setColor(gray)
+		}
+		pdf.CellFormat(25, 7, status, "", 1, "R", false, 0, "")
 	}
 
 	// Legend
@@ -487,6 +631,65 @@ func (s *Server) generateReport(scan *ScanRecord) (string, error) {
 	drawRect(50, pdf.GetY()+1, 3, 3, gray)
 	pdf.SetX(56)
 	pdf.CellFormat(30, 5, "= Skipped", "", 1, "L", false, 0, "")
+
+	// ─── RECONNAISSANCE FINDINGS ─────────────────────────
+	recon := collectReconReportSummary(scan.Events)
+	if recon.hasData() {
+		pdf.AddPage()
+		drawRect(0, 0, 210, 297, darkBg)
+		drawRect(0, 0, 210, 1.5, teal)
+
+		pdf.SetY(15)
+		pdf.SetFont("Helvetica", "B", 22)
+		setColor(teal)
+		pdf.CellFormat(190, 12, "Reconnaissance Findings", "", 1, "L", false, 0, "")
+		drawRect(10, pdf.GetY()+2, 62, 0.8, teal)
+		pdf.Ln(8)
+
+		pdf.SetFont("Helvetica", "", 9)
+		setColor(white)
+		pdf.SetX(10)
+		pdf.MultiCell(190, 4.5, "The following non-exploit reconnaissance observations were extracted from the scan feed and tool outputs. These are included for attack-surface documentation and operational handoff.", "", "L", false)
+		pdf.Ln(5)
+
+		drawReconList := func(title string, items []string) {
+			if len(items) == 0 {
+				return
+			}
+			if pdf.GetY() > 245 {
+				pdf.AddPage()
+				drawRect(0, 0, 210, 297, darkBg)
+				drawRect(0, 0, 210, 1.5, teal)
+				pdf.SetY(15)
+			}
+			headerY := pdf.GetY()
+			drawRect(10, headerY, 190, 8, sectionBg)
+			pdf.SetXY(14, headerY+1)
+			pdf.SetFont("Helvetica", "B", 9)
+			setColor(teal)
+			pdf.CellFormat(180, 6, strings.ToUpper(title), "", 1, "L", false, 0, "")
+			pdf.Ln(2)
+			pdf.SetFont("Courier", "", 7)
+			setColor(white)
+			for _, item := range items {
+				if pdf.GetY() > 270 {
+					pdf.AddPage()
+					drawRect(0, 0, 210, 297, darkBg)
+					drawRect(0, 0, 210, 1.5, teal)
+					pdf.SetY(15)
+				}
+				pdf.SetX(14)
+				pdf.MultiCell(182, 4, "- "+item, "", "L", false)
+			}
+			pdf.Ln(4)
+		}
+
+		drawReconList("DNS Records", recon.DNSRecords)
+		drawReconList("Resolved IP Addresses", recon.IPAddresses)
+		drawReconList("Open Ports & Services", recon.Ports)
+		drawReconList("Detected Technologies", recon.Technologies)
+		drawReconList("Observed URLs & Endpoints", recon.URLs)
+	}
 
 	// ─── BLUE TEAM TIMESTAMPS ─────────────────────────────
 	pdf.Ln(10)

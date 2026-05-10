@@ -242,6 +242,34 @@
           <span class="scan-view-instance-id" id="scan-view-instance-id"></span>
         </div>
 
+        <div class="scan-details-card" id="scan-details-card">
+          <div class="scan-details-main">
+            <div>
+              <div class="scan-details-label">Scan</div>
+              <div class="scan-details-title" id="scan-detail-name">Untitled scan</div>
+            </div>
+            <div class="scan-details-meta">
+              <span id="scan-detail-mode">SINGLE</span>
+              <span id="scan-detail-status">IDLE</span>
+            </div>
+          </div>
+          <div class="scan-details-grid">
+            <div>
+              <div class="scan-details-label">Target</div>
+              <div class="scan-details-value" id="scan-detail-target">—</div>
+            </div>
+            <div>
+              <div class="scan-details-label">Selected Phases</div>
+              <div class="scan-details-value" id="scan-detail-phases">All phases</div>
+            </div>
+            <div>
+              <div class="scan-details-label">Active Phase</div>
+              <div class="scan-details-value active-phase-label" id="scan-detail-active-phase">—</div>
+            </div>
+          </div>
+          <div class="phase-timeline" id="phase-timeline"></div>
+        </div>
+
       <!-- Queue Bar -->
       <div class="queue-bar" id="queue-bar">
         <div class="queue-info">
@@ -397,7 +425,7 @@
                   onkeypress="if(event.key==='Enter')sendChatMessage()">
                 <button id="chat-send-btn" onclick="sendChatMessage()" class="chat-send">Send</button>
               </div>
-              <div class="chat-hint">Chat is active during scans</div>
+              <div class="chat-hint" id="chat-hint">Chat is active during scans and after completion</div>
             </div>
           </div>
         </div>
