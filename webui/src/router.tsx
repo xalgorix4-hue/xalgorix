@@ -1,4 +1,4 @@
-import { createBrowserRouter, Navigate } from "react-router-dom"
+import { createBrowserRouter, Navigate, type RouteObject } from "react-router-dom"
 import { AuthBootstrap, RequireAuth, RedirectIfAuthed } from "@/app"
 import OverviewPage from "@/pages/overview"
 import ScansPage from "@/pages/scans"
@@ -18,7 +18,7 @@ function Root({ children }: { children: React.ReactNode }) {
   return <AuthBootstrap>{children}</AuthBootstrap>
 }
 
-export const router = createBrowserRouter([
+const routes: RouteObject[] = [
   {
     path: "/login",
     element: (
@@ -52,4 +52,6 @@ export const router = createBrowserRouter([
       { path: "*", element: <Navigate to="/404" replace /> },
     ],
   },
-])
+]
+
+export const router: ReturnType<typeof createBrowserRouter> = createBrowserRouter(routes)
